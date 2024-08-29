@@ -214,17 +214,17 @@ int main(int argc, char *const argv[])
         return -1;
     }
 
-    int passt_fd = connect_to_passt(cmdline.passt_socket_path);
+    // int passt_fd = connect_to_passt(cmdline.passt_socket_path);
 
-    if (passt_fd < 0) {
-      return -1;
-    }
+    // if (passt_fd < 0) {
+    //   return -1;
+    // }
 
-    if (err = krun_set_passt_fd(ctx_id, passt_fd)) {
-      errno = -err;
-      perror("Error configuring net mode");
-      return -1;
-    }
+    // if (err = krun_set_passt_fd(ctx_id, passt_fd)) {
+    //   errno = -err;
+    //   perror("Error configuring net mode");
+    //   return -1;
+    // }
 
     int efd = krun_get_shutdown_eventfd(ctx_id);
     if (efd < 0) {
