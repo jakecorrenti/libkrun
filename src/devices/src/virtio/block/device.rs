@@ -33,7 +33,7 @@ use super::{
 };
 
 use crate::legacy::Gic;
-use crate::virtio::ActivateError;
+use crate::virtio::{block::disk, ActivateError};
 
 /// Configuration options for disk caching.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -66,6 +66,12 @@ impl DiskProperties {
             .read(true)
             .write(!is_disk_read_only)
             .open(PathBuf::from(&disk_image_path))?;
+
+        let image_type = disk::detect_image_type(&disk_image, false).unwrap();
+        if let disk::ImageType::Qcow2 = image_type {
+            panic!("the format of the disk image is a qcow2. we don't know what to do with that.");
+        }
+
         let disk_size = disk_image.seek(SeekFrom::End(0))?;
 
         // We only support disk size, which uses the first two words of the configuration space.
