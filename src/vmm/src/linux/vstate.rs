@@ -150,6 +150,9 @@ pub enum Error {
     TdxSecVirtInit(TdxError),
     #[cfg(feature = "intel-tdx")]
     /// Error preparing the VM for Trust Domain Extensions (TDX)
+    TdxSecVirtInitVcpu,
+    #[cfg(feature = "intel-tdx")]
+    /// Error preparing the VM for Trust Domain Extensions (TDX)
     TdxSecVirtPrepare(TdxError),
     #[cfg(feature = "tee")]
     /// The TEE specified is not supported.
@@ -334,6 +337,11 @@ impl Display for Error {
             TdxSecVirtInit(e) => write!(
                 f,
                 "Error initializing the Trust Domain Extensions Backend (TDX): {e:?}"
+            ),
+            #[cfg(feature = "intel-tdx")]
+            TdxSecVirtInitVcpu => write!(
+                f,
+                "Error initializing vCPU for Trust Domain Extensions (TDX)"
             ),
             #[cfg(feature = "intel-tdx")]
             TdxSecVirtPrepare(e) => write!(
@@ -727,6 +735,14 @@ impl Vm {
         }
     }
 
+    #[cfg(feature = "intel-tdx")]
+    pub fn tdx_secure_virt_get_tdvf_hob_section_address(&self) -> Result<u64> {
+        match &self.tdx {
+            Some(t) => t.get_tdvf_hob_address().map_err(Error::TdxSecVirtPrepare),
+            None => Err(Error::InvalidTee),
+        }
+    }
+
     #[cfg(feature = "amd-sev")]
     pub fn sev_secure_virt_prepare(
         &mut self,
@@ -938,6 +954,12 @@ pub struct Vcpu {
 
 impl Vcpu {
     thread_local!(static TLS_VCPU_PTR: VcpuCell = const { Cell::new(None) });
+
+    #[cfg(feature = "intel-tdx")]
+    pub fn tdx_secure_virt_init(&self, hob_addr: u64) -> Result<()> {
+        tdx::launch::TdxVcpu::init_raw(&self.fd, hob_addr)
+            .or_else(|_| return Err(Error::TdxSecVirtInitVcpu))
+    }
 
     /// Associates `self` with the current thread.
     ///

@@ -47,6 +47,7 @@ pub enum Error {
     InvalidRamRange,
     InvalidRamType,
     InvalidTdvfSectionType,
+    MissingHobTdvfSection,
     OpenTdvfFirmwareFile(std::io::Error),
     ParseTdvfSections(tdx::tdvf::Error),
     TooManyRamEntries,
@@ -199,6 +200,16 @@ impl IntelTdx {
                 r#type: TdxRamType::TDX_RAM_UNACCEPTED,
             })
             .collect()
+    }
+
+    pub fn get_tdvf_hob_address(&self) -> Result<u64, Error> {
+        for section in &self.tdvf_sections {
+            if let TdvfSectionType::TdHob = section.section_type {
+                return Ok(section.memory_address);
+            }
+        }
+
+        Err(Error::MissingHobTdvfSection)
     }
 }
 
