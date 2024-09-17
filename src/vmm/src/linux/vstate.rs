@@ -132,6 +132,9 @@ pub enum Error {
     #[cfg(feature = "intel-tdx")]
     /// Error initializing the Trust Domain Extensions Backend (TDX)
     TdxSecVirtInit(TdxError),
+    #[cfg(feature = "intel-tdx")]
+    /// Error preparing the VM for Trust Domain Extensions (TDX)
+    TdxSecVirtPrepare(TdxError),
     #[cfg(feature = "tee")]
     /// The TEE specified is not supported.
     InvalidTee,
@@ -301,6 +304,11 @@ impl Display for Error {
             TdxSecVirtInit(e) => write!(
                 f,
                 "Error initializing the Trust Domain Extensions Backend (TDX): {e:?}"
+            ),
+            #[cfg(feature = "intel-tdx")]
+            TdxSecVirtPrepare(e) => write!(
+                f,
+                "Error preparing the VM for Trust Domain Extensions (TDX): {e:?}"
             ),
             #[cfg(feature = "tee")]
             MissingTeeConfig => write!(f, "Missing TEE configuration"),
@@ -697,6 +705,16 @@ impl Vm {
         self.next_mem_slot += 1;
 
         Ok(())
+    }
+
+    #[cfg(feature = "intel-tdx")]
+    pub fn tdx_secure_virt_prepare(&self) -> Result<()> {
+        match &self.tdx {
+            Some(t) => t
+                .vm_prepare(&self.fd, self.supported_cpuid.clone())
+                .map_err(Error::TdxSecVirtPrepare),
+            None => Err(Error::InvalidTee),
+        }
     }
 
     #[cfg(feature = "amd-sev")]

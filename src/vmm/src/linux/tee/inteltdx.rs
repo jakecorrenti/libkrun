@@ -6,6 +6,7 @@ use kvm_ioctls::VmFd;
 pub enum Error {
     CreateTdxVmStruct,
     GetCapabilities,
+    InitVm,
 }
 
 pub struct IntelTdx {
@@ -22,5 +23,17 @@ impl IntelTdx {
             .or_else(|_| return Err(Error::GetCapabilities))?;
 
         Ok(IntelTdx { caps, vm })
+    }
+
+    pub fn vm_prepare(
+        &self,
+        fd: &kvm_ioctls::VmFd,
+        cpuid: kvm_bindings::CpuId,
+    ) -> Result<(), Error> {
+        self.vm
+            .init_vm(fd, &self.caps, cpuid)
+            .or_else(|_| return Err(Error::InitVm))?;
+
+        Ok(())
     }
 }
