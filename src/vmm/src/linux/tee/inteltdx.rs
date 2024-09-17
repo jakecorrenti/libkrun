@@ -40,6 +40,7 @@ pub enum Error {
     AcceptRamRange,
     CreateTdvfSectionGuestMemory(vm_memory::Error),
     CreateTdxVmStruct,
+    FinalizeVm,
     GetCapabilities,
     GuestMemoryWriteTdHob(vm_memory::GuestMemoryError),
     InitVm,
@@ -210,6 +211,12 @@ impl IntelTdx {
         }
 
         Err(Error::MissingHobTdvfSection)
+    }
+
+    pub fn finalize_vm(&self, fd: &kvm_ioctls::VmFd) -> Result<(), Error> {
+        self.vm
+            .finalize(fd)
+            .or_else(|_| return Err(Error::FinalizeVm))
     }
 }
 
