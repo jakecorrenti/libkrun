@@ -25,6 +25,9 @@ use super::super::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK};
 #[cfg(feature = "amd-sev")]
 use super::tee::amdsnp::{AmdSnp, Error as SnpError};
 
+#[cfg(feature = "intel-tdx")]
+use super::tee::inteltdx::{Error as TdxError, IntelTdx};
+
 #[cfg(feature = "tee")]
 use kbs_types::Tee;
 
@@ -126,6 +129,9 @@ pub enum Error {
     #[cfg(feature = "amd-sev")]
     /// Error attesting the Secure VM (SNP).
     SnpSecVirtAttest(SnpError),
+    #[cfg(feature = "intel-tdx")]
+    /// Error initializing the Trust Domain Extensions Backend (TDX)
+    TdxSecVirtInit(TdxError),
     #[cfg(feature = "tee")]
     /// The TEE specified is not supported.
     InvalidTee,
@@ -291,6 +297,11 @@ impl Display for Error {
             SnpSecVirtAttest(e) => write!(f, "Error attesting the Secure VM (SNP): {e:?}"),
 
             SignalVcpu(e) => write!(f, "Failed to signal Vcpu: {e}"),
+            #[cfg(feature = "intel-tdx")]
+            TdxSecVirtInit(e) => write!(
+                f,
+                "Error initializing the Trust Domain Extensions Backend (TDX): {e:?}"
+            ),
             #[cfg(feature = "tee")]
             MissingTeeConfig => write!(f, "Missing TEE configuration"),
             #[cfg(target_arch = "x86_64")]
@@ -453,6 +464,9 @@ pub struct Vm {
     #[cfg(feature = "amd-sev")]
     tee: Option<AmdSnp>,
 
+    #[cfg(feature = "intel-tdx")]
+    tdx: Option<IntelTdx>,
+
     #[cfg(feature = "tee")]
     pub tee_config: Tee,
 
@@ -519,6 +533,48 @@ impl Vm {
             supported_cpuid,
             supported_msrs,
             tee,
+            tee_config: tee_config.tee,
+            guest_memfds: Vec::new(),
+        })
+    }
+
+    #[cfg(feature = "intel-tdx")]
+    pub fn new(kvm: &Kvm, tee_config: &TeeConfig) -> Result<Self> {
+        // create fd for interacting with kvm-vm specific functions
+        let vm_fd = kvm
+            .create_vm_with_type(tdx::launch::KVM_X86_TDX_VM)
+            .map_err(Error::VmFd)?;
+
+        let supported_cpuid = kvm
+            .get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
+            .map_err(Error::VmFd)?;
+
+        let supported_msrs =
+            arch::x86_64::msr::supported_guest_msrs(kvm).map_err(Error::GuestMSRs)?;
+
+        let mut cap = kvm_enable_cap {
+            cap: KVM_CAP_EXIT_HYPERCALL,
+            flags: 0,
+            args: [1 << 12 /* KVM_HC_MAP_GPA_RANGE */, 0, 0, 0],
+            ..Default::default()
+        };
+        vm_fd.enable_cap(&cap).map_err(Error::HypercallExitEnable)?;
+
+        cap.cap = kvm_bindings::KVM_CAP_SPLIT_IRQCHIP;
+        cap.args[0] = 24;
+        vm_fd.enable_cap(&cap).unwrap();
+
+        cap.cap = 237;
+        cap.args[0] = 40;
+        vm_fd.enable_cap(&cap).unwrap();
+
+        let tdx = IntelTdx::new(&vm_fd).map_err(Error::TdxSecVirtInit)?;
+        Ok(Vm {
+            fd: vm_fd,
+            next_mem_slot: 0,
+            supported_cpuid,
+            supported_msrs,
+            tdx: Some(tdx),
             tee_config: tee_config.tee,
             guest_memfds: Vec::new(),
         })
