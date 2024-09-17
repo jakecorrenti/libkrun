@@ -1,0 +1,43 @@
+use tdx::launch::{TdxCapabilities, TdxVm};
+use tdx::tdvf::{self, TdvfSection};
+
+use kvm_ioctls::VmFd;
+
+use std::fs::File;
+use std::io;
+
+#[derive(Debug)]
+pub enum Error {
+    CreateTdxVmStruct,
+    GetCapabilities,
+    OpenTdvfFirmwareFile(io::Error),
+    ParseTdvfSections(tdvf::Error),
+}
+
+pub struct IntelTdx {
+    caps: TdxCapabilities,
+    vm: TdxVm,
+    tdvf_sections: Vec<TdvfSection>,
+    tdvf_file: File,
+}
+
+impl IntelTdx {
+    pub fn new(vm_fd: &VmFd, vcpu_count: u8) -> Result<Self, Error> {
+        let vm = TdxVm::new(vm_fd, vcpu_count as u64).or_else(|_| return Err(Error::CreateTdxVmStruct))?;
+        let caps = vm
+            .get_capabilities(vm_fd)
+            .or_else(|_| return Err(Error::GetCapabilities))?;
+
+        let mut firmware = std::fs::File::open("/usr/share/edk2/ovmf/OVMF.inteltdx.fd")
+            .map_err(Error::OpenTdvfFirmwareFile)?;
+        let tdvf_sections =
+            tdx::tdvf::parse_sections(&mut firmware).map_err(Error::ParseTdvfSections)?;
+
+        Ok(IntelTdx {
+            caps,
+            vm,
+            tdvf_sections,
+            tdvf_file: firmware,
+        })
+    }
+}
