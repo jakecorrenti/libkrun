@@ -71,6 +71,8 @@ impl DiskProperties {
         let image_type = disk::detect_image_type(&disk_image, false).unwrap();
         if let disk::ImageType::Qcow2 = image_type {
             panic!("the format of the disk image is a qcow2. we don't know what to do with that.");
+            // TODO: need to create a new instance of a Qcow2 file based on the current value of 
+            // `disk_image` so that we can try and see if that will provide us the support we need
         }
 
         let disk_size = disk_image.seek(SeekFrom::End(0))?;

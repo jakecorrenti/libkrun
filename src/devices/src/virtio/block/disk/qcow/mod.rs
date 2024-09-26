@@ -1,13 +1,190 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool};
-use std::collections::{HashSet, HashMap};
-use std::sync::Arc;
+use std::collections::{HashSet, HashMap, LinkedList};
+use std::sync::{self, Arc, Mutex};
 use std::hash::Hash;
+use std::task::Walker;
 
 use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 use serde::{Serialize, Deserialize};
 
 // QCOW magic constant that starts the header.
 pub const QCOW_MAGIC: u32 = 0x5146_49fb;
+
+pub struct Qcow2State {
+    hdr: AsyncMutex<Qcow2Header>,
+    read_only: bool,
+
+    virtual_size: u64,
+    cluster_size: usize,
+    l2_entries: usize,
+    rb_entries: usize,
+    refcount_order: u32,
+
+    in_cluster_offset_mask: usize,
+    l2_index_mask: usize,
+    cluster_shift: u32,
+    l2_index_shift: u32,
+    rb_index_mask: usize,
+    rb_index_shift: u32,
+    free_cluster_offset: AtomicU64,
+
+    l1table: AsyncRwLock<L1Table>,
+    l2cache: AsyncLruCache<L1Index, AsyncRwLock<L2Table>>,
+    reftable: AsyncRwLock<RefTable>,
+    refblock_cache: AsyncLruCache<RefTableIndex, AsyncMutex<RefBlock>>,
+    /// Refblocks that must be flushed before flushing any L2 table.  When locking this in
+    /// conjunction with an L2 table, you *must* lock the L2 table first (so that both locks are
+    /// always taken in the same order and do not trigger a deadlock).
+    refblock_dependencies: AsyncMutex<HashSet<RefTableIndex>>,
+}
+
+impl Qcow2State {
+    pub async fn new(file: &Arc<NodeUser>, read_only: bool) -> BlockResult<Self> {
+        let queue = file.new_queue()?;
+        let hdr = Qcow2Header::from(&queue, read_only).await?;
+
+        let virtual_size = hdr.size();
+        let cluster_shift = hdr.cluster_bits();
+        let cluster_size: usize = 1usize
+            .checked_shl(cluster_shift)
+            .ok_or_else(|| format!("cluster_bits={} is too large", cluster_shift))?;
+        let refcount_order = hdr.refcount_order();
+
+        let table_entries_per_cluster = cluster_size / std::mem::size_of::<u64>();
+        let refcounts_per_cluster = cluster_size / std::mem::size_of::<u16>();
+
+        let (l1_offset, l1_entries) = (hdr.l1_table_offset(), hdr.l1_table_entries());
+        let (rt_offset, rt_clusters) = (hdr.reftable_offset(), hdr.reftable_clusters());
+
+        let mut qcow2_file = Qcow2State {
+            hdr: AsyncMutex::new(hdr),
+            read_only,
+
+            virtual_size,
+            cluster_size,
+            l2_entries: table_entries_per_cluster,
+            rb_entries: refcounts_per_cluster,
+            refcount_order,
+
+            in_cluster_offset_mask: cluster_size - 1,
+            l2_index_mask: table_entries_per_cluster - 1,
+            cluster_shift,
+            l2_index_shift: table_entries_per_cluster.trailing_zeros(),
+            rb_index_mask: refcounts_per_cluster - 1,
+            rb_index_shift: refcounts_per_cluster.trailing_zeros(),
+            free_cluster_offset: AtomicU64::new(0),
+
+            l1table: AsyncRwLock::new(L1Table::empty()),
+            l2cache: AsyncLruCache::new(128),
+            reftable: AsyncRwLock::new(RefTable::empty()),
+            refblock_cache: AsyncLruCache::new(128),
+            refblock_dependencies: AsyncMutex::new(HashSet::new()),
+        };
+
+        let l1table = L1Table::load(&qcow2_file, &queue, l1_offset, l1_entries).await?;
+        qcow2_file.l1table = AsyncRwLock::new(l1table);
+
+        let reftable = RefTable::load(
+            &qcow2_file,
+            &queue,
+            rt_offset,
+            rt_clusters * table_entries_per_cluster,
+        )
+        .await?;
+        qcow2_file.reftable = AsyncRwLock::new(reftable);
+
+        Ok(qcow2_file)
+    }
+}
+
+pub struct NodeInner {
+    pub name: String,
+
+    driver: Box<dyn NodeDriverData + Send + Sync>,
+
+    opts: Mutex<NodeConfig>,
+    pre_reopen_opts: Mutex<Option<NodeConfig>>,
+
+    limits: NodeLimits,
+    pre_reopen_limits: Mutex<Option<NodeLimits>>,
+
+    users: Mutex<Vec<sync::Weak<NodeUser>>>,
+    queue_handles: Mutex<Vec<IoQueueHandle>>,
+    bitmaps: Mutex<HashMap<String, Arc<Mutex<DirtyBitmap>>>>,
+
+    quiesce_count: Arc<AtomicUsize>,
+    driver_quiesce_count: AtomicUsize,
+    in_flight: Arc<AtomicUsize>,
+
+    /// Writes that all other writes must await when intersecting
+    serializing_writes: RwLock<Vec<Arc<InFlightWrite>>>,
+    /// Only serializing writes need to await these writes
+    nonserializing_writes: RwLock<Vec<Arc<InFlightWrite>>>,
+
+    quiesce_waiters: Mutex<LinkedList<Waker>>,
+    quiesced_queues: Mutex<LinkedList<Waker>>,
+}
+
+pub type Node = SendOnDrop<NodeInner>;
+
+/// Parents of nodes do not own those nodes directly, but through `NodeUser` objects.  These
+/// describe the parent and the permissions the parent uses and blocks.
+pub struct NodeUser {
+    node: Arc<Node>,
+    parent: NodeParent,
+
+    /// List of permissions the parent has taken and blocked
+    permissions: Arc<IntMutNodePermPair>,
+    /// During a reopen, this captures the pre-reopen permissions so we can roll back to them if
+    /// needed
+    roll_back_permissions: Mutex<Option<NodePermPair>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct NodeConfig {
+    pub node_name: String,
+
+    pub read_only: Option<bool>,
+    pub auto_read_only: Option<bool>,
+
+    #[serde(default)]
+    pub cache: NodeCacheConfig,
+
+    #[serde(flatten)]
+    driver: NodeDriverConfig,
+}
+
+/// Pair of permissions, i.e. those that have been taken, and those that have been blocked
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NodePermPair {
+    /// Permissions for things this user can do with the node
+    taken: NodePerms,
+    /// Things other users are not allowed to do with the node
+    blocked: NodePerms,
+}
+
+/// Same as `NodePermPair`, but provides interior mutability
+#[derive(Debug, Default)]
+struct IntMutNodePermPair {
+    taken: IntMutNodePerms,
+    blocked: IntMutNodePerms,
+}
+
+/// Represent any combination of permissions
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NodePerms(u64);
+
+/// Same as `NodePerms`, but with interior mutability
+#[derive(Debug, Default)]
+pub struct IntMutNodePerms(AtomicU64);
+
+/// Describes a node's parent node
+#[derive(Clone, Debug)]
+struct NodeParent {
+    node_name: String,
+    child_name: String,
+}
 
 pub struct Qcow2Header {
     raw: Qcow2RawHeader,
@@ -202,34 +379,6 @@ struct Qcow2RawHeader {
 
     /// Additional fields
     compression_type: u8,
-}
-
-pub struct Qcow2State {
-    hdr: AsyncMutex<Qcow2Header>,
-    read_only: bool,
-
-    virtual_size: u64,
-    cluster_size: usize,
-    l2_entries: usize,
-    rb_entries: usize,
-    refcount_order: u32,
-
-    in_cluster_offset_mask: usize,
-    l2_index_mask: usize,
-    cluster_shift: u32,
-    l2_index_shift: u32,
-    rb_index_mask: usize,
-    rb_index_shift: u32,
-    free_cluster_offset: AtomicU64,
-
-    l1table: AsyncRwLock<L1Table>,
-    l2cache: AsyncLruCache<L1Index, AsyncRwLock<L2Table>>,
-    reftable: AsyncRwLock<RefTable>,
-    refblock_cache: AsyncLruCache<RefTableIndex, AsyncMutex<RefBlock>>,
-    /// Refblocks that must be flushed before flushing any L2 table.  When locking this in
-    /// conjunction with an L2 table, you *must* lock the L2 table first (so that both locks are
-    /// always taken in the same order and do not trigger a deadlock).
-    refblock_dependencies: AsyncMutex<HashSet<RefTableIndex>>,
 }
 
 pub struct AsyncLruCache<K: Clone + PartialEq + Eq + Hash, V> {
