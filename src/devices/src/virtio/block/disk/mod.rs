@@ -2,7 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-pub mod qcow;
+pub mod qcow2;
+mod node;
+mod helpers;
 
 use crate::virtio::file_traits::{FileReadWriteAtVolatile, FileSetLen};
 use std::fmt::Debug;
@@ -14,6 +16,113 @@ pub enum Error {
     ReadingHeader(io::Error),
     SeekingFile(io::Error),
 }
+
+#[derive(Debug)]
+pub struct BlockError {
+    description: String,
+    io: io::Error,
+}
+
+pub type BlockResult<R> = std::result::Result<R, BlockError>;
+
+impl Clone for BlockError {
+    fn clone(&self) -> Self {
+        BlockError {
+            description: self.description.clone(),
+            io: io::Error::from(self.io.kind()),
+        }
+    }
+}
+
+impl From<io::Error> for BlockError {
+    fn from(err: io::Error) -> Self {
+        let description = err.to_string();
+        BlockError {
+            description,
+            io: err,
+        }
+    }
+}
+
+impl From<io::ErrorKind> for BlockError {
+    fn from(err: io::ErrorKind) -> Self {
+        let io = io::Error::from(err);
+        let description = io.to_string();
+        BlockError { description, io }
+    }
+}
+
+impl<T> From<tokio::sync::mpsc::error::SendError<T>> for BlockError {
+    fn from(err: tokio::sync::mpsc::error::SendError<T>) -> Self {
+        let description = err.to_string();
+        let io = io::Error::new(io::ErrorKind::ConnectionAborted, description.clone());
+        BlockError { description, io }
+    }
+}
+
+impl<T> From<tokio::sync::mpsc::error::TrySendError<T>> for BlockError {
+    fn from(err: tokio::sync::mpsc::error::TrySendError<T>) -> Self {
+        let description = err.to_string();
+        let io = io::Error::new(io::ErrorKind::ConnectionAborted, description.clone());
+        BlockError { description, io }
+    }
+}
+
+macro_rules! impl_from {
+    ($type:ty, $kind:ident) => {
+        impl From<$type> for BlockError {
+            fn from(err: $type) -> Self {
+                let description = err.to_string();
+                let io = io::Error::new(io::ErrorKind::$kind, description.clone());
+                BlockError { description, io }
+            }
+        }
+    };
+}
+
+impl_from!(Box<bincode::ErrorKind>, InvalidData);
+impl_from!(serde_json::Error, InvalidData);
+impl_from!(std::num::TryFromIntError, InvalidData);
+impl_from!(std::str::Utf8Error, InvalidData);
+impl_from!(&str, Other);
+impl_from!(String, Other);
+#[cfg(feature = "io_uring")]
+impl_from!(blkio::Error, Other);
+impl_from!(std::alloc::LayoutError, OutOfMemory);
+
+impl BlockError {
+    pub fn from_desc(description: String) -> Self {
+        let io = io::Error::new(io::ErrorKind::Other, description.clone());
+        BlockError { description, io }
+    }
+
+    pub fn into_inner(self) -> io::Error {
+        self.io
+    }
+
+    pub fn get_inner(&self) -> &io::Error {
+        &self.io
+    }
+
+    pub fn into_description(self) -> String {
+        self.description
+    }
+
+    #[must_use]
+    pub fn prepend(mut self, prefix: &str) -> Self {
+        self.description = format!("{}: {}", prefix, self.description);
+        self
+    }
+}
+
+impl std::fmt::Display for BlockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.description)
+    }
+}
+
+impl std::error::Error for BlockError {}
+
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -109,7 +218,7 @@ pub fn detect_image_type(file: &File, overlapped_mode: bool) -> Result<ImageType
 
     #[allow(unused_variables)] // magic4 is only used with the qcow or android-sparse features.
     if let Some(magic4) = magic.data.get(0..4) {
-        if magic4 == qcow::QCOW_MAGIC.to_be_bytes() {
+        if magic4 == qcow2::meta::QCOW2_MAGIC.to_be_bytes() {
             return Ok(ImageType::Qcow2);
         }
     }
