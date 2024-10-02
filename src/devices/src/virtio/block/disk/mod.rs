@@ -4,8 +4,11 @@
 
 pub mod qcow;
 
+use crate::virtio::file_traits::{FileReadWriteAtVolatile, FileSetLen};
+use std::fmt::Debug;
+
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 #[derive(Debug)]
 pub enum Error {
@@ -85,4 +88,38 @@ pub fn read_from_disk(
     file.seek(SeekFrom::Start(offset))
         .map_err(Error::SeekingFile)?;
     file.read_exact(buf).map_err(Error::ReadingHeader)
+}
+
+/// The prerequisites necessary to support a block device.
+pub trait DiskFile:
+    FileSetLen + DiskGetLen + FileReadWriteAtVolatile + Send + Debug + Write
+{
+    /// Creates a new DiskFile instance that shares the same underlying disk file image. IO
+    /// operations to a DiskFile should affect all DiskFile instances with the same underlying disk
+    /// file image.
+    ///
+    /// `try_clone()` returns [`io::ErrorKind::Unsupported`] Error if a DiskFile does not support
+    /// creating an instance with the same underlying disk file image.
+    fn try_clone(&self) -> io::Result<Box<dyn DiskFile>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "unsupported operation",
+        ))
+    }
+    fn flush(&self) -> io::Result<()>;
+    fn sync_all(&self) -> io::Result<()>;
+}
+impl DiskFile for File {
+    fn try_clone(&self) -> io::Result<Box<dyn DiskFile>> {
+        Ok(Box::new(self.try_clone()?))
+    }
+    fn flush(&self) -> io::Result<()> {
+        // I don't fully understand why calling the underlying File type's flush() will infinitely
+        // hang, but CrosVM does a noop here because "Nothing to flush, all file mutations are
+        // immediately sent to the OS."
+        Ok(())
+    }
+    fn sync_all(&self) -> io::Result<()> {
+        self.sync_all()
+    }
 }

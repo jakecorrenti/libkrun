@@ -228,7 +228,7 @@ impl BlockWorker {
                     Err(RequestError::InvalidDataLength)
                 } else {
                     writer
-                        .write_from_at(&self.disk.file, data_len, request_header.sector * 512)
+                        .write_from_at(&*self.disk.file, data_len, request_header.sector * 512)
                         .map_err(RequestError::WritingToDescriptor)
                 }
             }
@@ -238,7 +238,7 @@ impl BlockWorker {
                     Err(RequestError::InvalidDataLength)
                 } else {
                     reader
-                        .read_to_at(&self.disk.file, data_len, request_header.sector * 512)
+                        .read_to_at(&*self.disk.file, data_len, request_header.sector * 512)
                         .map_err(RequestError::ReadingFromDescriptor)
                 }
             }
