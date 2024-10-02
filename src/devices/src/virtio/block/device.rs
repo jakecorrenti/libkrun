@@ -9,6 +9,7 @@ use std::cmp;
 use std::convert::From;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
+use std::ops::{Deref, DerefMut};
 #[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt;
 #[cfg(target_os = "macos")]
@@ -51,7 +52,7 @@ pub enum CacheType {
 /// Helper object for setting up all `Block` fields derived from its backing file.
 pub(crate) struct DiskProperties {
     cache_type: CacheType,
-    pub(crate) file: File,
+    pub(crate) file: Box<dyn disk::DiskFile>,
     nsectors: u64,
     image_id: Vec<u8>,
 }
@@ -70,8 +71,7 @@ impl DiskProperties {
 
         let image_type = disk::detect_image_type(&disk_image, false).unwrap();
         if let disk::ImageType::Qcow2 = image_type {
-            println!("howdy doody");
-            panic!("the format of the disk image is a qcow2. we don't know what to do with that.");
+            panic!("Unsupported disk image format: Qcow2");
         }
 
         // We only support disk size, which uses the first two words of the configuration space.
@@ -88,11 +88,11 @@ impl DiskProperties {
             cache_type,
             nsectors: disk_size >> SECTOR_SHIFT,
             image_id: Self::build_disk_image_id(&disk_image),
-            file: disk_image,
+            file: Box::new(disk_image),
         })
     }
 
-    pub fn file_mut(&mut self) -> &mut File {
+    pub fn file_mut(&mut self) -> &mut Box<dyn disk::DiskFile> {
         &mut self.file
     }
 
@@ -143,11 +143,11 @@ impl Drop for DiskProperties {
         match self.cache_type {
             CacheType::Writeback => {
                 // flush() first to force any cached data out.
-                if self.file.flush().is_err() {
+                if self.file.deref().flush().is_err() {
                     error!("Failed to flush block data on drop.");
                 }
                 // Sync data out to physical media on host.
-                if self.file.sync_all().is_err() {
+                if self.file.deref_mut().sync_all().is_err() {
                     error!("Failed to sync block data on drop.")
                 }
             }
