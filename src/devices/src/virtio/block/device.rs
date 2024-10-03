@@ -34,6 +34,8 @@ use super::{
 };
 
 use crate::legacy::Gic;
+use crate::virtio::block::disk::qcow::QcowFile;
+use crate::virtio::block::disk::{DiskFile, DiskFileParams};
 use crate::virtio::{block::disk, ActivateError};
 
 /// Configuration options for disk caching.
@@ -68,11 +70,7 @@ impl DiskProperties {
             .write(!is_disk_read_only)
             .open(PathBuf::from(&disk_image_path))?;
         let disk_size = disk_image.seek(SeekFrom::End(0))?;
-
         let image_type = disk::detect_image_type(&disk_image, false).unwrap();
-        if let disk::ImageType::Qcow2 = image_type {
-            panic!("Unsupported disk image format: Qcow2");
-        }
 
         // We only support disk size, which uses the first two words of the configuration space.
         // If the image is not a multiple of the sector size, the tail bits are not exposed.
@@ -84,12 +82,37 @@ impl DiskProperties {
             );
         }
 
-        Ok(Self {
-            cache_type,
-            nsectors: disk_size >> SECTOR_SHIFT,
-            image_id: Self::build_disk_image_id(&disk_image),
-            file: Box::new(disk_image),
-        })
+        let img = disk_image.try_clone().unwrap();
+        if let disk::ImageType::Qcow2 = image_type {
+            let q = QcowFile::from(
+                disk_image,
+                DiskFileParams {
+                    path: PathBuf::from(&disk_image_path),
+                    is_read_only: is_disk_read_only,
+                    is_sparse_file: true,
+                    is_overlapped: false,
+                    is_direct: false,
+                    lock: true,
+                    depth: 0,
+                },
+            )
+            .unwrap();
+            // println!("Qcow2File::from(disk_image): {:?}", q);
+            // panic!("Unsupported disk image format: Qcow2");
+            Ok(Self {
+                cache_type,
+                nsectors: disk_size >> SECTOR_SHIFT,
+                image_id: Self::build_disk_image_id(&img),
+                file: Box::new(q),
+            })
+        } else {
+            Ok(Self {
+                cache_type,
+                nsectors: disk_size >> SECTOR_SHIFT,
+                image_id: Self::build_disk_image_id(&disk_image),
+                file: Box::new(disk_image),
+            })
+        }
     }
 
     pub fn file_mut(&mut self) -> &mut Box<dyn disk::DiskFile> {

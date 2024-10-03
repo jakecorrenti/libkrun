@@ -8,7 +8,7 @@ edition = "2021"
 tee = []
 amd-sev = ["blk", "tee"]
 net = []
-blk = []
+blk = ["thiserror"]
 efi = ["blk", "net"]
 gpu = ["rutabaga_gfx", "thiserror", "zerocopy", "zerocopy-derive"]
 snd = ["pw", "thiserror"]
@@ -33,6 +33,7 @@ arch = { path = "../arch" }
 utils = { path = "../utils" }
 polly = { path = "../polly" }
 rutabaga_gfx = { path = "../rutabaga_gfx", features = ["virgl_renderer", "virgl_renderer_next"], optional = true }
+serde = { version = "1.0.210", features = ["derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 hvf = { path = "../hvf" }

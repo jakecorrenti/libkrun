@@ -12,6 +12,35 @@ use libc::{c_int, c_void, read, readv, size_t, write, writev};
 
 use super::bindings::{off64_t, pread64, preadv64, pwrite64, pwritev64};
 
+/// A trait for flushing the contents of a file to disk.
+/// This is equivalent to File's `sync_all` and `sync_data` methods, but wrapped in a trait so that
+/// it can be implemented for other types.
+pub trait FileSync {
+    // Flush buffers related to this file to disk.
+    fn fsync(&self) -> Result<()>;
+
+    // Flush buffers related to this file's data to disk, avoiding updating extra metadata. Note
+    // that an implementation may simply implement fsync for fdatasync.
+    fn fdatasync(&self) -> Result<()>;
+}
+
+impl FileSync for File {
+    fn fsync(&self) -> Result<()> {
+        self.sync_all()
+    }
+
+    fn fdatasync(&self) -> Result<()> {
+        self.sync_data()
+    }
+}
+
+/// A trait for allocating disk space in a sparse file.
+/// This is equivalent to fallocate() with no special flags.
+pub trait FileAllocate {
+    /// Allocate storage for the region of the file starting at `offset` and extending `len` bytes.
+    fn allocate(&self, offset: u64, len: u64) -> Result<()>;
+}
+
 /// A trait for setting the size of a file.
 /// This is equivalent to File's `set_len` method, but
 /// wrapped in a trait so that it can be implemented for
