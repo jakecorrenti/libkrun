@@ -1,8 +1,10 @@
-use std::path::Path;
-use std::os::unix::io::RawFd;
-use std::fs::File;
-use crate::virtio::block::disk::base::descriptor::{FromRawDescriptor, RawDescriptor, SafeDescriptor};
 use super::super::errno::Result;
+use crate::virtio::block::disk::base::descriptor::{
+    FromRawDescriptor, RawDescriptor, SafeDescriptor,
+};
+use std::fs::File;
+use std::os::unix::io::RawFd;
+use std::path::Path;
 
 /// The operation to perform with `flock`.
 pub enum FlockOperation {
@@ -14,7 +16,11 @@ pub enum FlockOperation {
 /// Safe wrapper for flock(2) with the operation `op` and optionally `nonblocking`. The lock will be
 /// dropped automatically when `file` is dropped.
 #[inline(always)]
-pub fn flock<F: super::super::descriptor::AsRawDescriptor>(file: &F, op: FlockOperation, nonblocking: bool) -> Result<()> {
+pub fn flock<F: super::super::descriptor::AsRawDescriptor>(
+    file: &F,
+    op: FlockOperation,
+    nonblocking: bool,
+) -> Result<()> {
     let mut operation = match op {
         FlockOperation::LockShared => libc::LOCK_SH,
         FlockOperation::LockExclusive => libc::LOCK_EX,
@@ -36,7 +42,10 @@ pub fn flock<F: super::super::descriptor::AsRawDescriptor>(file: &F, op: FlockOp
 /// Note that this will not work properly if the same `/proc/self/fd/N` path is used twice in
 /// different places, as the metadata (including the offset) will be shared between both file
 /// descriptors.
-pub fn open_file_or_duplicate<P: AsRef<Path>>(path: P, options: &std::fs::OpenOptions) -> Result<File> {
+pub fn open_file_or_duplicate<P: AsRef<Path>>(
+    path: P,
+    options: &std::fs::OpenOptions,
+) -> Result<File> {
     let path = path.as_ref();
     // Special case '/proc/self/fd/*' paths. The FD is already open, just use it.
     Ok(if let Some(fd) = safe_descriptor_from_path(path)? {
@@ -82,7 +91,9 @@ pub fn validate_raw_fd(raw_fd: &RawFd) -> Result<RawFd> {
     // Safe because this doesn't modify any memory and we check the return value.
     let flags = unsafe { libc::fcntl(*raw_fd, libc::F_GETFD) };
     if flags < 0 || (flags & libc::FD_CLOEXEC) != 0 {
-        return Err(crate::virtio::block::disk::base::errno::Error::new(libc::EBADF));
+        return Err(crate::virtio::block::disk::base::errno::Error::new(
+            libc::EBADF,
+        ));
     }
 
     // SAFETY:

@@ -1,9 +1,11 @@
+use crate::syscall;
+use crate::virtio::block::disk::base::descriptor::{
+    AsRawDescriptor, RawDescriptor, SafeDescriptor,
+};
+use serde::Serializer;
 use std::cell::RefCell;
 use std::mem::MaybeUninit;
 use std::os::unix::fs::FileExt;
-use serde::Serializer;
-use crate::syscall;
-use crate::virtio::block::disk::base::descriptor::{AsRawDescriptor, RawDescriptor, SafeDescriptor};
 
 pub mod sys;
 
@@ -91,11 +93,11 @@ pub mod errno {
 pub mod descriptor {
     use std::fs::File;
     use std::mem;
-    use std::os::fd::RawFd;
-    use std::sync::Arc;
-    use std::os::fd::IntoRawFd;
     use std::os::fd::AsRawFd;
     use std::os::fd::FromRawFd;
+    use std::os::fd::IntoRawFd;
+    use std::os::fd::RawFd;
+    use std::sync::Arc;
 
     use serde::Deserialize;
     use serde::Serialize;
@@ -272,11 +274,9 @@ pub fn serialize_descriptor<S: Serializer>(
     se: S,
 ) -> std::result::Result<S::Ok, S::Error> {
     let index = push_descriptor(*rd).map_err(serde::ser::Error::custom)?;
-    se.serialize_u32(
-        index
-            .try_into()
-            .map_err(|_| serde::ser::Error::custom("attempt to serialize too many descriptors at once"))?,
-    )
+    se.serialize_u32(index.try_into().map_err(|_| {
+        serde::ser::Error::custom("attempt to serialize too many descriptors at once")
+    })?)
 }
 
 /// Pushes a descriptor on the thread local destination of descriptors, returning the index in which
@@ -314,13 +314,13 @@ fn take_descriptor(index: usize) -> Result<SafeDescriptor, &'static str> {
 /// Module that exports `serialize`/`deserialize` functions for use with `#[serde(with = "...")]`
 /// attribute. It only works with fields with `RawDescriptor` type.
 pub mod with_raw_descriptor {
-    use serde::Deserializer;
-    use serde::de;
-    use serde::de::Error;
-    use crate::virtio::block::disk::base::take_descriptor;
+    use super::descriptor::IntoRawDescriptor;
     use super::descriptor::{RawDescriptor, SafeDescriptor};
     pub use super::serialize_descriptor as serialize;
-    use super::descriptor::IntoRawDescriptor;
+    use crate::virtio::block::disk::base::take_descriptor;
+    use serde::de;
+    use serde::de::Error;
+    use serde::Deserializer;
 
     pub fn deserialize<'de, D>(de: D) -> std::result::Result<RawDescriptor, D::Error>
     where
@@ -392,7 +392,6 @@ pub mod with_raw_descriptor {
         let index = de.deserialize_u32(DescriptorVisitor)? as usize;
         take_descriptor(index).map_err(D::Error::custom)
     }
-
 }
 
 /// A trait for writing zeroes to an arbitrary position in a file.
@@ -429,12 +428,20 @@ pub trait WriteZeroesAt {
 }
 
 /// THIS IS A LINUX IMPLEMENTATION... THE CROSVM MAC IMPLEMENTATION WAS A TODO!()
-pub(crate) fn file_write_zeroes_at(file: &std::fs::File, offset: u64, length: usize) -> std::io::Result<usize> {
+pub(crate) fn file_write_zeroes_at(
+    file: &std::fs::File,
+    offset: u64,
+    length: usize,
+) -> std::io::Result<usize> {
     todo!();
 }
 
 /// THIS IS A LINUX IMPLEMENTATION... THE CROSVM MAC IMPLEMENTATION WAS A TODO!()
-pub(crate) fn file_punch_hole(file: &std::fs::File, offset: u64, length: u64) -> std::io::Result<()> {
+pub(crate) fn file_punch_hole(
+    file: &std::fs::File,
+    offset: u64,
+    length: u64,
+) -> std::io::Result<()> {
     todo!();
 }
 
@@ -443,7 +450,6 @@ impl WriteZeroesAt for std::fs::File {
         file_write_zeroes_at(self, offset, length)
     }
 }
-
 
 /// A trait for deallocating space in a file.
 pub trait PunchHole {

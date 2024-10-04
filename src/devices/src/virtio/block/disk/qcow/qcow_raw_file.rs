@@ -1,9 +1,9 @@
 use std::fs::File;
 
-use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
-use vm_memory::VolatileSlice;
 use crate::virtio::block::disk::base::WriteZeroesAt;
 use crate::virtio::file_traits::FileReadWriteAtVolatile;
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use vm_memory::VolatileSlice;
 
 #[derive(Debug)]
 pub struct QcowRawFile {
@@ -60,7 +60,8 @@ impl QcowRawFile {
                 "`initial_data` is too small",
             ));
         }
-        let volatile_slice = unsafe {VolatileSlice::new(initial_data.as_mut_ptr(),self.cluster_size as usize) };
+        let volatile_slice =
+            unsafe { VolatileSlice::new(initial_data.as_mut_ptr(), self.cluster_size as usize) };
         self.file.write_all_at_volatile(volatile_slice, address)
     }
 

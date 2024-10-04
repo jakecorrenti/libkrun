@@ -2,18 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+mod base;
 pub mod qcow;
 pub mod sys;
-mod base;
 
 use crate::virtio::file_traits::{FileReadWriteAtVolatile, FileSetLen, FileSync};
 
+use crate::virtio::block::disk::base::descriptor::AsRawDescriptors;
+use crate::virtio::block::disk::qcow::QcowFile;
 use std::fmt::Debug;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use crate::virtio::block::disk::base::descriptor::AsRawDescriptors;
-use crate::virtio::block::disk::qcow::QcowFile;
 
 /// Nesting depth limit for disk formats that can open other disk files.
 const MAX_NESTING_DEPTH: u32 = 10;

@@ -1,7 +1,7 @@
+use crate::virtio::block::disk::base::sys::linux::open_file_or_duplicate;
+use crate::virtio::block::disk::{DiskFileParams, Error, Result};
 use std::fs::File;
 use std::os::fd::AsRawFd;
-use crate::virtio::block::disk::{DiskFileParams, Error, Result};
-use crate::virtio::block::disk::base::sys::linux::open_file_or_duplicate;
 
 pub fn open_raw_disk_image(params: &DiskFileParams) -> Result<File> {
     let mut options = File::options();
@@ -17,7 +17,8 @@ pub fn open_raw_disk_image(params: &DiskFileParams) -> Result<File> {
         } else {
             crate::virtio::block::disk::base::sys::linux::FlockOperation::LockExclusive
         };
-        crate::virtio::block::disk::base::sys::linux::flock(&raw_image, lock_op, true).map_err(Error::LockFileFailure)?;
+        crate::virtio::block::disk::base::sys::linux::flock(&raw_image, lock_op, true)
+            .map_err(Error::LockFileFailure)?;
     }
 
     // If O_DIRECT is requested, set the flag via fcntl. It is not done at
@@ -25,7 +26,11 @@ pub fn open_raw_disk_image(params: &DiskFileParams) -> Result<File> {
     // not actually use the given OpenOptions.
     if params.is_direct {
         const O_DIRECT: libc::c_int = 0x4000;
-        crate::virtio::block::disk::base::sys::unix::fcntl::add_fd_flags(raw_image.as_raw_fd(), O_DIRECT).map_err(Error::DirectFailed)?;
+        crate::virtio::block::disk::base::sys::unix::fcntl::add_fd_flags(
+            raw_image.as_raw_fd(),
+            O_DIRECT,
+        )
+        .map_err(Error::DirectFailed)?;
     }
 
     Ok(raw_image)

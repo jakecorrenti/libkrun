@@ -1,6 +1,6 @@
 use super::vec_cache::{CacheMap, Cacheable, VecCache};
-use std::io;
 use crate::virtio::block::disk::qcow::qcow_raw_file::QcowRawFile;
+use std::io;
 
 #[derive(Debug)]
 pub enum Error {

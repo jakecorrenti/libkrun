@@ -28,7 +28,7 @@ fn set_fd_flags(fd: RawFd, flags: c_int) -> Result<()> {
         // fcntlt is trusted not to modify the memory of the calling process.
         unsafe { fcntl(fd, F_SETFL, flags) }
     )
-        .map(|_| ())
+    .map(|_| ())
 }
 
 /// Performs a logical OR of the given flags with the FD's flags, setting the given bits for the

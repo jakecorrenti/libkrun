@@ -2,20 +2,22 @@ mod qcow_raw_file;
 mod refcount;
 mod vec_cache;
 
+use crate::virtio::block::disk::base::descriptor::{
+    AsRawDescriptor, AsRawDescriptors, RawDescriptor,
+};
+use crate::virtio::block::disk::base::{PunchHole, WriteZeroesAt};
+use crate::virtio::block::disk::qcow::vec_cache::Cacheable;
+use crate::virtio::block::disk::{DiskFile, DiskGetLen};
+use crate::virtio::file_traits::{FileAllocate, FileReadWriteAtVolatile, FileSetLen, FileSync};
+use crate::virtio::AsAny;
+use qcow_raw_file::QcowRawFile;
+use refcount::RefCount;
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
-use vm_memory::{VolatileMemory, VolatileSlice};
-use qcow_raw_file::QcowRawFile;
-use refcount::RefCount;
 use vec_cache::{CacheMap, VecCache};
-use crate::virtio::AsAny;
-use crate::virtio::block::disk::base::descriptor::{AsRawDescriptor, AsRawDescriptors, RawDescriptor};
-use crate::virtio::block::disk::{DiskFile, DiskGetLen};
-use crate::virtio::block::disk::base::{PunchHole, WriteZeroesAt};
-use crate::virtio::block::disk::qcow::vec_cache::Cacheable;
-use crate::virtio::file_traits::{FileAllocate, FileReadWriteAtVolatile, FileSetLen, FileSync};
+use vm_memory::{VolatileMemory, VolatileSlice};
 
 // QCOW magic constant that starts the header.
 pub const QCOW_MAGIC: u32 = 0x5146_49fb;
@@ -449,7 +451,6 @@ impl QcowHeader {
 }
 
 impl QcowFileInner {
-
     // Fill a range of `length` bytes starting at `address` with zeroes.
     // Any future reads of this range will return all zeroes.
     // If there is no backing file, this will deallocate cluster storage when possible.
@@ -1001,7 +1002,9 @@ impl QcowFileInner {
                     let cluster_size = self.raw_file.cluster_size();
                     let cluster_begin = address - (address % cluster_size);
                     let mut cluster_data = vec![0u8; cluster_size as usize];
-                    let volatile_slice = unsafe { VolatileSlice::new(cluster_data.as_mut_ptr(), cluster_data.len()) };
+                    let volatile_slice = unsafe {
+                        VolatileSlice::new(cluster_data.as_mut_ptr(), cluster_data.len())
+                    };
                     backing.read_exact_at_volatile(volatile_slice, cluster_begin)?;
                     Some(cluster_data)
                 } else {
@@ -1223,7 +1226,9 @@ impl Read for QcowFile {
                 match file {
                     Some(f) => f.read_exact_at_volatile(sub_slice, offset),
                     None => {
-                        unsafe { std::ptr::write_bytes(&mut sub_slice as _, 0, sub_slice.len()); }
+                        unsafe {
+                            std::ptr::write_bytes(&mut sub_slice as _, 0, sub_slice.len());
+                        }
                         // sub_slice.write_bytes(0);
                         Ok(())
                     }
@@ -1296,7 +1301,9 @@ impl FileReadWriteAtVolatile for QcowFile {
             match file {
                 Some(f) => f.read_exact_at_volatile(sub_slice, offset),
                 None => {
-                    unsafe { std::ptr::write_bytes(&mut sub_slice as _, 0, sub_slice.len()); }
+                    unsafe {
+                        std::ptr::write_bytes(&mut sub_slice as _, 0, sub_slice.len());
+                    }
                     // sub_slice.write_bytes(0);
                     Ok(())
                 }
