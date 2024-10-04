@@ -4,13 +4,16 @@
 
 pub mod qcow;
 pub mod sys;
+mod base;
 
-use crate::virtio::file_traits::{FileReadWriteAtVolatile, FileSetLen};
+use crate::virtio::file_traits::{FileReadWriteAtVolatile, FileSetLen, FileSync};
 
 use std::fmt::Debug;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use crate::virtio::block::disk::base::descriptor::AsRawDescriptors;
+use crate::virtio::block::disk::qcow::QcowFile;
 
 /// Nesting depth limit for disk formats that can open other disk files.
 const MAX_NESTING_DEPTH: u32 = 10;
@@ -18,11 +21,13 @@ const MAX_NESTING_DEPTH: u32 = 10;
 #[derive(Debug)]
 pub enum Error {
     MaxNestingDepthExceeded,
-    OpeningFile(String, base::Error),
+    OpenFile(String, base::errno::Error),
     QcowError(qcow::Error),
     ReadingHeader(io::Error),
     SeekingFile(io::Error),
     UnknownType,
+    LockFileFailure(base::errno::Error),
+    DirectFailed(base::errno::Error),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -119,7 +124,7 @@ pub fn read_from_disk(
 
 /// The prerequisites necessary to support a block device.
 pub trait DiskFile:
-    FileSetLen + DiskGetLen + FileReadWriteAtVolatile + Send + Debug + Write
+    FileSetLen + DiskGetLen + FileReadWriteAtVolatile + Send + Debug + Write + AsRawDescriptors
 {
     /// Creates a new DiskFile instance that shares the same underlying disk file image. IO
     /// operations to a DiskFile should affect all DiskFile instances with the same underlying disk
@@ -135,6 +140,16 @@ pub trait DiskFile:
     }
     fn flush(&self) -> io::Result<()>;
     fn sync_all(&self) -> io::Result<()>;
+}
+
+impl DiskFile for QcowFile {
+    fn flush(&self) -> io::Result<()> {
+        self.fsync()
+    }
+
+    fn sync_all(&self) -> io::Result<()> {
+        self.sync_all()
+    }
 }
 
 impl DiskFile for File {

@@ -6,10 +6,16 @@ use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
-
+use vm_memory::{VolatileMemory, VolatileSlice};
 use qcow_raw_file::QcowRawFile;
 use refcount::RefCount;
 use vec_cache::{CacheMap, VecCache};
+use crate::virtio::AsAny;
+use crate::virtio::block::disk::base::descriptor::{AsRawDescriptor, AsRawDescriptors, RawDescriptor};
+use crate::virtio::block::disk::{DiskFile, DiskGetLen};
+use crate::virtio::block::disk::base::{PunchHole, WriteZeroesAt};
+use crate::virtio::block::disk::qcow::vec_cache::Cacheable;
+use crate::virtio::file_traits::{FileAllocate, FileReadWriteAtVolatile, FileSetLen, FileSync};
 
 // QCOW magic constant that starts the header.
 pub const QCOW_MAGIC: u32 = 0x5146_49fb;
@@ -443,6 +449,134 @@ impl QcowHeader {
 }
 
 impl QcowFileInner {
+
+    // Fill a range of `length` bytes starting at `address` with zeroes.
+    // Any future reads of this range will return all zeroes.
+    // If there is no backing file, this will deallocate cluster storage when possible.
+    fn zero_bytes(&mut self, address: u64, length: usize) -> std::io::Result<()> {
+        let write_count: usize = self.limit_range_file(address, length);
+
+        let mut nwritten: usize = 0;
+        while nwritten < write_count {
+            let curr_addr = address + nwritten as u64;
+            let count = self.limit_range_cluster(curr_addr, write_count - nwritten);
+
+            if self.backing_file.is_none() && count == self.raw_file.cluster_size() as usize {
+                // Full cluster and no backing file in use - deallocate the storage.
+                self.deallocate_cluster(curr_addr)?;
+            } else {
+                // Partial cluster - zero out the relevant bytes.
+                let offset = if self.backing_file.is_some() {
+                    // There is a backing file, so we need to allocate a cluster in order to
+                    // zero out the hole-punched bytes such that the backing file contents do not
+                    // show through.
+                    Some(self.file_offset_write(curr_addr)?)
+                } else {
+                    // Any space in unallocated clusters can be left alone, since
+                    // unallocated clusters already read back as zeroes.
+                    self.file_offset_read(curr_addr)?
+                };
+                if let Some(offset) = offset {
+                    // Partial cluster - zero it out.
+                    self.raw_file.file().write_zeroes_all_at(offset, count)?;
+                }
+            }
+
+            nwritten += count;
+        }
+        Ok(())
+    }
+
+    // Writes `count` bytes starting at `address`, calling `cb` repeatedly with the backing file,
+    // number of bytes written so far, raw file offset, and number of bytes to write to the file in
+    // that invocation.
+    fn write_cb<F>(&mut self, address: u64, count: usize, mut cb: F) -> std::io::Result<usize>
+    where
+        F: FnMut(&mut File, usize, u64, usize) -> std::io::Result<()>,
+    {
+        let write_count: usize = self.limit_range_file(address, count);
+
+        let mut nwritten: usize = 0;
+        while nwritten < write_count {
+            let curr_addr = address + nwritten as u64;
+            let offset = self.file_offset_write(curr_addr)?;
+            let count = self.limit_range_cluster(curr_addr, write_count - nwritten);
+
+            cb(self.raw_file.file_mut(), nwritten, offset, count)?;
+
+            nwritten += count;
+        }
+        Ok(write_count)
+    }
+    fn sync_caches(&mut self) -> std::io::Result<()> {
+        // Write out all dirty L2 tables.
+        for (l1_index, l2_table) in self.l2_cache.iter_mut().filter(|(_k, v)| v.dirty()) {
+            // The index must be valid from when we insterted it.
+            let addr = self.l1_table[*l1_index];
+            if addr != 0 {
+                self.raw_file.write_pointer_table(
+                    addr,
+                    l2_table.get_values(),
+                    CLUSTER_USED_FLAG,
+                )?;
+            } else {
+                return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            l2_table.mark_clean();
+        }
+        // Write the modified refcount blocks.
+        self.refcounts.flush_blocks(&mut self.raw_file)?;
+        // Make sure metadata(file len) and all data clusters are written.
+        self.raw_file.file_mut().sync_all()?;
+
+        // Push L1 table and refcount table last as all the clusters they point to are now
+        // guaranteed to be valid.
+        let mut sync_required = false;
+        if self.l1_table.dirty() {
+            self.raw_file.write_pointer_table(
+                self.header.l1_table_offset,
+                self.l1_table.get_values(),
+                0,
+            )?;
+            self.l1_table.mark_clean();
+            sync_required = true;
+        }
+        sync_required |= self.refcounts.flush_table(&mut self.raw_file)?;
+        if sync_required {
+            self.raw_file.file_mut().sync_data()?;
+        }
+        Ok(())
+    }
+
+    // Reads `count` bytes starting at `address`, calling `cb` repeatedly with the data source,
+    // number of bytes read so far, offset to read from, and number of bytes to read from the file
+    // in that invocation. If None is given to `cb` in place of the backing file, the `cb` should
+    // infer zeros would have been read.
+    fn read_cb<F>(&mut self, address: u64, count: usize, mut cb: F) -> std::io::Result<usize>
+    where
+        F: FnMut(Option<&mut dyn DiskFile>, usize, u64, usize) -> std::io::Result<()>,
+    {
+        let read_count: usize = self.limit_range_file(address, count);
+
+        let mut nread: usize = 0;
+        while nread < read_count {
+            let curr_addr = address + nread as u64;
+            let file_offset = self.file_offset_read(curr_addr)?;
+            let count = self.limit_range_cluster(curr_addr, read_count - nread);
+
+            if let Some(offset) = file_offset {
+                cb(Some(self.raw_file.file_mut()), nread, offset, count)?;
+            } else if let Some(backing) = self.backing_file.as_mut() {
+                cb(Some(backing.as_mut()), nread, curr_addr, count)?;
+            } else {
+                cb(None, nread, 0, count)?;
+            }
+
+            nread += count;
+        }
+        Ok(read_count)
+    }
+
     /// Rebuild the reference count tables.
     fn rebuild_refcounts(raw_file: &mut QcowRawFile, header: QcowHeader) -> Result<()> {
         fn add_ref(refcounts: &mut [u16], cluster_size: u64, cluster_address: u64) -> Result<()> {
@@ -691,6 +825,24 @@ impl QcowFileInner {
         (address / self.raw_file.cluster_size()) / self.l2_entries
     }
 
+    // Gets the offset of `address` in the L2 table.
+    fn l2_table_index(&self, address: u64) -> u64 {
+        (address / self.raw_file.cluster_size()) % self.l2_entries
+    }
+
+    // Reads an L2 cluster from the disk, returning an error if the file can't be read or if any
+    // cluster is compressed.
+    fn read_l2_cluster(raw_file: &mut QcowRawFile, cluster_addr: u64) -> std::io::Result<Vec<u64>> {
+        let file_values = raw_file.read_pointer_cluster(cluster_addr, None)?;
+        if file_values.iter().any(|entry| entry & COMPRESSED_FLAG != 0) {
+            return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+        }
+        Ok(file_values
+            .iter()
+            .map(|entry| *entry & L2_TABLE_OFFSET_MASK)
+            .collect())
+    }
+
     // Gets the maximum virtual size of this image.
     fn virtual_size(&self) -> u64 {
         self.header.size
@@ -717,5 +869,512 @@ impl QcowFileInner {
         }
 
         Ok(())
+    }
+
+    // Limits the range so that it doesn't exceed the virtual size of the file.
+    fn limit_range_file(&self, address: u64, count: usize) -> usize {
+        if address.checked_add(count as u64).is_none() || address > self.virtual_size() {
+            return 0;
+        }
+        min(count as u64, self.virtual_size() - address) as usize
+    }
+
+    // Limits the range so that it doesn't overflow the end of a cluster.
+    fn limit_range_cluster(&self, address: u64, count: usize) -> usize {
+        let offset: u64 = self.raw_file.cluster_offset(address);
+        let limit = self.raw_file.cluster_size() - offset;
+        min(count as u64, limit) as usize
+    }
+
+    // Deallocate the storage for the cluster starting at `address`.
+    // Any future reads of this cluster will return all zeroes (or the backing file, if in use).
+    fn deallocate_cluster(&mut self, address: u64) -> std::io::Result<()> {
+        if address >= self.virtual_size() {
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        }
+
+        let l1_index = self.l1_table_index(address) as usize;
+        let l2_addr_disk = *self
+            .l1_table
+            .get(l1_index)
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let l2_index = self.l2_table_index(address) as usize;
+
+        if l2_addr_disk == 0 {
+            // The whole L2 table for this address is not allocated yet,
+            // so the cluster must also be unallocated.
+            return Ok(());
+        }
+
+        if !self.l2_cache.contains_key(&l1_index) {
+            // Not in the cache.
+            let table =
+                VecCache::from_vec(Self::read_l2_cluster(&mut self.raw_file, l2_addr_disk)?);
+            let l1_table = &self.l1_table;
+            let raw_file = &mut self.raw_file;
+            self.l2_cache.insert(l1_index, table, |index, evicted| {
+                raw_file.write_pointer_table(
+                    l1_table[index],
+                    evicted.get_values(),
+                    CLUSTER_USED_FLAG,
+                )
+            })?;
+        }
+
+        let cluster_addr = self.l2_cache.get(&l1_index).unwrap()[l2_index];
+        if cluster_addr == 0 {
+            // This cluster is already unallocated; nothing to do.
+            return Ok(());
+        }
+
+        // Decrement the refcount.
+        let refcount = self
+            .refcounts
+            .get_cluster_refcount(&mut self.raw_file, cluster_addr)
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        if refcount == 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        }
+
+        let new_refcount = refcount - 1;
+        let mut newly_unref = self.set_cluster_refcount(cluster_addr, new_refcount)?;
+        self.unref_clusters.append(&mut newly_unref);
+
+        // Rewrite the L2 entry to remove the cluster mapping.
+        // unwrap is safe as we just checked/inserted this entry.
+        self.l2_cache.get_mut(&l1_index).unwrap()[l2_index] = 0;
+
+        if new_refcount == 0 {
+            let cluster_size = self.raw_file.cluster_size();
+            // This cluster is no longer in use; deallocate the storage.
+            // The underlying FS may not support FALLOC_FL_PUNCH_HOLE,
+            // so don't treat an error as fatal.  Future reads will return zeros anyways.
+            let _ = self.raw_file.file().punch_hole(cluster_addr, cluster_size);
+            self.unref_clusters.push(cluster_addr);
+        }
+        Ok(())
+    }
+
+    // Gets the offset of the given guest address in the host file. If L1, L2, or data clusters need
+    // to be allocated, they will be.
+    fn file_offset_write(&mut self, address: u64) -> std::io::Result<u64> {
+        if address >= self.virtual_size() {
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        }
+
+        let l1_index = self.l1_table_index(address) as usize;
+        let l2_addr_disk = *self
+            .l1_table
+            .get(l1_index)
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let l2_index = self.l2_table_index(address) as usize;
+
+        let mut set_refcounts = Vec::new();
+
+        if !self.l2_cache.contains_key(&l1_index) {
+            // Not in the cache.
+            let l2_table = if l2_addr_disk == 0 {
+                // Allocate a new cluster to store the L2 table and update the L1 table to point
+                // to the new table.
+                let new_addr: u64 = self.get_new_cluster(None)?;
+                // The cluster refcount starts at one meaning it is used but doesn't need COW.
+                set_refcounts.push((new_addr, 1));
+                self.l1_table[l1_index] = new_addr;
+                VecCache::new(self.l2_entries as usize)
+            } else {
+                VecCache::from_vec(Self::read_l2_cluster(&mut self.raw_file, l2_addr_disk)?)
+            };
+            let l1_table = &self.l1_table;
+            let raw_file = &mut self.raw_file;
+            self.l2_cache.insert(l1_index, l2_table, |index, evicted| {
+                raw_file.write_pointer_table(
+                    l1_table[index],
+                    evicted.get_values(),
+                    CLUSTER_USED_FLAG,
+                )
+            })?;
+        }
+
+        let cluster_addr = match self.l2_cache.get(&l1_index).unwrap()[l2_index] {
+            0 => {
+                let initial_data = if let Some(backing) = self.backing_file.as_mut() {
+                    let cluster_size = self.raw_file.cluster_size();
+                    let cluster_begin = address - (address % cluster_size);
+                    let mut cluster_data = vec![0u8; cluster_size as usize];
+                    let volatile_slice = unsafe { VolatileSlice::new(cluster_data.as_mut_ptr(), cluster_data.len()) };
+                    backing.read_exact_at_volatile(volatile_slice, cluster_begin)?;
+                    Some(cluster_data)
+                } else {
+                    None
+                };
+                // Need to allocate a data cluster
+                let cluster_addr = self.append_data_cluster(initial_data)?;
+                self.update_cluster_addr(l1_index, l2_index, cluster_addr, &mut set_refcounts)?;
+                cluster_addr
+            }
+            a => a,
+        };
+
+        for (addr, count) in set_refcounts {
+            let mut newly_unref = self.set_cluster_refcount(addr, count)?;
+            self.unref_clusters.append(&mut newly_unref);
+        }
+
+        Ok(cluster_addr + self.raw_file.cluster_offset(address))
+    }
+
+    // Gets the offset of the given guest address in the host file. If L1, L2, or data clusters have
+    // yet to be allocated, return None.
+    fn file_offset_read(&mut self, address: u64) -> std::io::Result<Option<u64>> {
+        if address >= self.virtual_size() {
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        }
+
+        let l1_index = self.l1_table_index(address) as usize;
+        let l2_addr_disk = *self
+            .l1_table
+            .get(l1_index)
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+
+        if l2_addr_disk == 0 {
+            // Reading from an unallocated cluster will return zeros.
+            return Ok(None);
+        }
+
+        let l2_index = self.l2_table_index(address) as usize;
+
+        if !self.l2_cache.contains_key(&l1_index) {
+            // Not in the cache.
+            let table =
+                VecCache::from_vec(Self::read_l2_cluster(&mut self.raw_file, l2_addr_disk)?);
+
+            let l1_table = &self.l1_table;
+            let raw_file = &mut self.raw_file;
+            self.l2_cache.insert(l1_index, table, |index, evicted| {
+                raw_file.write_pointer_table(
+                    l1_table[index],
+                    evicted.get_values(),
+                    CLUSTER_USED_FLAG,
+                )
+            })?;
+        };
+
+        let cluster_addr = self.l2_cache.get(&l1_index).unwrap()[l2_index];
+        if cluster_addr == 0 {
+            return Ok(None);
+        }
+        Ok(Some(cluster_addr + self.raw_file.cluster_offset(address)))
+    }
+
+    // Allocate a new cluster and return its offset within the raw file.
+    fn get_new_cluster(&mut self, initial_data: Option<Vec<u8>>) -> std::io::Result<u64> {
+        // First use a pre allocated cluster if one is available.
+        if let Some(free_cluster) = self.avail_clusters.pop() {
+            if let Some(initial_data) = initial_data {
+                self.raw_file.write_cluster(free_cluster, initial_data)?;
+            } else {
+                self.raw_file.zero_cluster(free_cluster)?;
+            }
+            return Ok(free_cluster);
+        }
+
+        let max_valid_cluster_offset = self.refcounts.max_valid_cluster_offset();
+        if let Some(new_cluster) = self.raw_file.add_cluster_end(max_valid_cluster_offset)? {
+            if let Some(initial_data) = initial_data {
+                self.raw_file.write_cluster(new_cluster, initial_data)?;
+            }
+            Ok(new_cluster)
+        } else {
+            error!("No free clusters in get_new_cluster()");
+            Err(std::io::Error::from_raw_os_error(libc::ENOSPC))
+        }
+    }
+
+    // Updates the l1 and l2 tables to point to the new `cluster_addr`.
+    fn update_cluster_addr(
+        &mut self,
+        l1_index: usize,
+        l2_index: usize,
+        cluster_addr: u64,
+        set_refcounts: &mut Vec<(u64, u16)>,
+    ) -> io::Result<()> {
+        if !self.l2_cache.get(&l1_index).unwrap().dirty() {
+            // Free the previously used cluster if one exists. Modified tables are always
+            // witten to new clusters so the L1 table can be committed to disk after they
+            // are and L1 never points at an invalid table.
+            // The index must be valid from when it was insterted.
+            let addr = self.l1_table[l1_index];
+            if addr != 0 {
+                self.unref_clusters.push(addr);
+                set_refcounts.push((addr, 0));
+            }
+
+            // Allocate a new cluster to store the L2 table and update the L1 table to point
+            // to the new table. The cluster will be written when the cache is flushed, no
+            // need to copy the data now.
+            let new_addr: u64 = self.get_new_cluster(None)?;
+            // The cluster refcount starts at one indicating it is used but doesn't need
+            // COW.
+            set_refcounts.push((new_addr, 1));
+            self.l1_table[l1_index] = new_addr;
+        }
+        // 'unwrap' is OK because it was just added.
+        self.l2_cache.get_mut(&l1_index).unwrap()[l2_index] = cluster_addr;
+        Ok(())
+    }
+
+    // Allocate and initialize a new data cluster. Returns the offset of the
+    // cluster in to the file on success.
+    fn append_data_cluster(&mut self, initial_data: Option<Vec<u8>>) -> std::io::Result<u64> {
+        let new_addr: u64 = self.get_new_cluster(initial_data)?;
+        // The cluster refcount starts at one indicating it is used but doesn't need COW.
+        let mut newly_unref = self.set_cluster_refcount(new_addr, 1)?;
+        self.unref_clusters.append(&mut newly_unref);
+        Ok(new_addr)
+    }
+
+    // Set the refcount for a cluster with the given address.
+    // Returns a list of any refblocks that can be reused, this happens when a refblock is moved,
+    // the old location can be reused.
+    fn set_cluster_refcount(&mut self, address: u64, refcount: u16) -> std::io::Result<Vec<u64>> {
+        let mut added_clusters = Vec::new();
+        let mut unref_clusters = Vec::new();
+        let mut refcount_set = false;
+        let mut new_cluster = None;
+
+        while !refcount_set {
+            match self.refcounts.set_cluster_refcount(
+                &mut self.raw_file,
+                address,
+                refcount,
+                new_cluster.take(),
+            ) {
+                Ok(None) => {
+                    refcount_set = true;
+                }
+                Ok(Some(freed_cluster)) => {
+                    unref_clusters.push(freed_cluster);
+                    refcount_set = true;
+                }
+                Err(refcount::Error::EvictingRefCounts(e)) => {
+                    return Err(e);
+                }
+                Err(refcount::Error::InvalidIndex) => {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                }
+                Err(refcount::Error::NeedCluster(addr)) => {
+                    // Read the address and call set_cluster_refcount again.
+                    new_cluster = Some((
+                        addr,
+                        VecCache::from_vec(self.raw_file.read_refcount_block(addr)?),
+                    ));
+                }
+                Err(refcount::Error::NeedNewCluster) => {
+                    // Allocate the cluster and call set_cluster_refcount again.
+                    let addr = self.get_new_cluster(None)?;
+                    added_clusters.push(addr);
+                    new_cluster = Some((
+                        addr,
+                        VecCache::new(self.refcounts.refcounts_per_block() as usize),
+                    ));
+                }
+                Err(refcount::Error::ReadingRefCounts(e)) => {
+                    return Err(e);
+                }
+            }
+        }
+
+        for addr in added_clusters {
+            self.set_cluster_refcount(addr, 1)?;
+        }
+        Ok(unref_clusters)
+    }
+}
+
+impl Drop for QcowFile {
+    fn drop(&mut self) {
+        let _ = self.inner.get_mut().unwrap().sync_caches();
+    }
+}
+
+impl AsRawDescriptors for QcowFile {
+    fn as_raw_descriptors(&self) -> Vec<RawDescriptor> {
+        // Taking a lock here feels wrong, but this method is generally only used during
+        // sandboxing, so it should be OK.
+        let inner = self.inner.lock().unwrap();
+        let mut descriptors = vec![inner.raw_file.file().as_raw_descriptor()];
+        if let Some(backing) = &inner.backing_file {
+            descriptors.append(&mut backing.as_raw_descriptors());
+        }
+        descriptors
+    }
+}
+
+impl Read for QcowFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let inner = self.inner.get_mut().unwrap();
+        let len = buf.len();
+        let slice = unsafe { VolatileSlice::new(buf.as_mut_ptr(), buf.len()) };
+        let read_count = inner.read_cb(
+            inner.current_offset,
+            len,
+            |file, already_read, offset, count| {
+                let mut sub_slice = slice.get_slice(already_read, count).unwrap();
+                match file {
+                    Some(f) => f.read_exact_at_volatile(sub_slice, offset),
+                    None => {
+                        unsafe { std::ptr::write_bytes(&mut sub_slice as _, 0, sub_slice.len()); }
+                        // sub_slice.write_bytes(0);
+                        Ok(())
+                    }
+                }
+            },
+        )?;
+        inner.current_offset += read_count as u64;
+        Ok(read_count)
+    }
+}
+
+impl Seek for QcowFile {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let inner = self.inner.get_mut().unwrap();
+        let new_offset: Option<u64> = match pos {
+            SeekFrom::Start(off) => Some(off),
+            SeekFrom::End(off) => {
+                if off < 0 {
+                    0i64.checked_sub(off)
+                        .and_then(|increment| inner.virtual_size().checked_sub(increment as u64))
+                } else {
+                    inner.virtual_size().checked_add(off as u64)
+                }
+            }
+            SeekFrom::Current(off) => {
+                if off < 0 {
+                    0i64.checked_sub(off)
+                        .and_then(|increment| inner.current_offset.checked_sub(increment as u64))
+                } else {
+                    inner.current_offset.checked_add(off as u64)
+                }
+            }
+        };
+
+        if let Some(o) = new_offset {
+            if o <= inner.virtual_size() {
+                inner.current_offset = o;
+                return Ok(o);
+            }
+        }
+        Err(std::io::Error::from_raw_os_error(libc::EINVAL))
+    }
+}
+
+impl Write for QcowFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let inner = self.inner.get_mut().unwrap();
+        let write_count = inner.write_cb(
+            inner.current_offset,
+            buf.len(),
+            |file, offset, raw_offset, count| {
+                file.seek(SeekFrom::Start(raw_offset))?;
+                file.write_all(&buf[offset..(offset + count)])
+            },
+        )?;
+        inner.current_offset += write_count as u64;
+        Ok(write_count)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.fsync()
+    }
+}
+
+impl FileReadWriteAtVolatile for QcowFile {
+    fn read_at_volatile(&self, slice: VolatileSlice, offset: u64) -> io::Result<usize> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.read_cb(offset, slice.len(), |file, read, offset, count| {
+            let mut sub_slice = slice.get_slice(read, count).unwrap();
+            match file {
+                Some(f) => f.read_exact_at_volatile(sub_slice, offset),
+                None => {
+                    unsafe { std::ptr::write_bytes(&mut sub_slice as _, 0, sub_slice.len()); }
+                    // sub_slice.write_bytes(0);
+                    Ok(())
+                }
+            }
+        })
+    }
+
+    fn write_at_volatile(&self, slice: VolatileSlice, offset: u64) -> io::Result<usize> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.write_cb(offset, slice.len(), |file, offset, raw_offset, count| {
+            let sub_slice = slice.get_slice(offset, count).unwrap();
+            file.write_all_at_volatile(sub_slice, raw_offset)
+        })
+    }
+}
+
+impl FileSync for QcowFile {
+    fn fsync(&self) -> std::io::Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.sync_caches()?;
+        let unref_clusters = std::mem::take(&mut inner.unref_clusters);
+        inner.avail_clusters.extend(unref_clusters);
+        Ok(())
+    }
+
+    fn fdatasync(&self) -> io::Result<()> {
+        // QcowFile does not implement fdatasync. Just fall back to fsync.
+        self.fsync()
+    }
+}
+
+impl FileSetLen for QcowFile {
+    fn set_len(&self, _len: u64) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "set_len() not supported for QcowFile",
+        ))
+    }
+}
+
+impl DiskGetLen for QcowFile {
+    fn get_len(&self) -> io::Result<u64> {
+        Ok(self.virtual_size)
+    }
+}
+
+impl FileAllocate for QcowFile {
+    fn allocate(&self, offset: u64, len: u64) -> io::Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        // Call write_cb with a do-nothing callback, which will have the effect
+        // of allocating all clusters in the specified range.
+        inner.write_cb(
+            offset,
+            len as usize,
+            |_file, _offset, _raw_offset, _count| Ok(()),
+        )?;
+        Ok(())
+    }
+}
+
+impl PunchHole for QcowFile {
+    fn punch_hole(&self, offset: u64, length: u64) -> std::io::Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut remaining = length;
+        let mut offset = offset;
+        while remaining > 0 {
+            let chunk_length = min(remaining, usize::MAX as u64) as usize;
+            inner.zero_bytes(offset, chunk_length)?;
+            remaining -= chunk_length as u64;
+            offset += chunk_length as u64;
+        }
+        Ok(())
+    }
+}
+
+impl WriteZeroesAt for QcowFile {
+    fn write_zeroes_at(&self, offset: u64, length: usize) -> io::Result<usize> {
+        self.punch_hole(offset, length as u64)?;
+        Ok(length)
     }
 }

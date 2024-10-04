@@ -1,6 +1,9 @@
 use std::fs::File;
 
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use vm_memory::VolatileSlice;
+use crate::virtio::block::disk::base::WriteZeroesAt;
+use crate::virtio::file_traits::FileReadWriteAtVolatile;
 
 #[derive(Debug)]
 pub struct QcowRawFile {
@@ -42,6 +45,48 @@ impl QcowRawFile {
         Ok(table)
     }
 
+    /// Reads a cluster's worth of 64 bit offsets and returns them as a vector.
+    /// `mask` optionally ands out some of the bits on the file.
+    pub fn read_pointer_cluster(&mut self, offset: u64, mask: Option<u64>) -> io::Result<Vec<u64>> {
+        let count = self.cluster_size / size_of::<u64>() as u64;
+        self.read_pointer_table(offset, count, mask)
+    }
+
+    /// Writes
+    pub fn write_cluster(&mut self, address: u64, mut initial_data: Vec<u8>) -> io::Result<()> {
+        if (initial_data.len() as u64) < self.cluster_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "`initial_data` is too small",
+            ));
+        }
+        let volatile_slice = unsafe {VolatileSlice::new(initial_data.as_mut_ptr(),self.cluster_size as usize) };
+        self.file.write_all_at_volatile(volatile_slice, address)
+    }
+
+    /// Zeros out a cluster in the file.
+    pub fn zero_cluster(&mut self, address: u64) -> io::Result<()> {
+        let cluster_size = self.cluster_size as usize;
+        self.file.write_zeroes_all_at(address, cluster_size)?;
+        Ok(())
+    }
+
+    /// Allocates a new cluster at the end of the current file, return the address.
+    pub fn add_cluster_end(&mut self, max_valid_cluster_offset: u64) -> io::Result<Option<u64>> {
+        // Determine where the new end of the file should be and set_len, which
+        // translates to truncate(2).
+        let file_end: u64 = self.file.seek(SeekFrom::End(0))?;
+        let new_cluster_address: u64 = (file_end + self.cluster_size - 1) & !self.cluster_mask;
+
+        if new_cluster_address > max_valid_cluster_offset {
+            return Ok(None);
+        }
+
+        self.file.set_len(new_cluster_address + self.cluster_size)?;
+
+        Ok(Some(new_cluster_address))
+    }
+
     /// Writes `table` of u64 pointers to `offset` in the file.
     /// `non_zero_flags` will be ORed with all non-zero values in `table`.
     /// writing.
@@ -74,6 +119,11 @@ impl QcowRawFile {
         &mut self.file
     }
 
+    /// Returns a reference to the underlying file.
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+
     /// Writes a refcount block to the file.
     pub fn write_refcount_block(&mut self, offset: u64, table: &[u16]) -> io::Result<()> {
         self.file.seek(SeekFrom::Start(offset))?;
@@ -96,5 +146,10 @@ impl QcowRawFile {
             *refcount = u16::from_be_bytes(value);
         }
         Ok(table)
+    }
+
+    /// Returns the offset of `address` within a cluster.
+    pub fn cluster_offset(&self, address: u64) -> u64 {
+        address & self.cluster_mask
     }
 }
