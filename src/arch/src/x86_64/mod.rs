@@ -215,7 +215,7 @@ pub fn configure_system(
     initrd: &Option<InitrdConfig>,
     num_cpus: u8,
     e820_entries: &mut Vec<arch_gen::x86::bootparam::e820entry>,
-    num_e820_entires: &mut u8,
+    num_e820_entries: &mut u8,
 ) -> super::Result<()> {
     const KERNEL_BOOT_FLAG_MAGIC: u16 = 0xaa55;
     const KERNEL_HDR_MAGIC: u32 = 0x5372_6448;
@@ -250,6 +250,7 @@ pub fn configure_system(
     }
 
     add_e820_entry(&mut params.0, 0, EBDA_START, E820_RAM)?;
+    *num_e820_entries += 1;
 
     let last_addr = GuestAddress(arch_memory_info.ram_last_addr);
     if last_addr < end_32bit_gap_start {
@@ -261,6 +262,7 @@ pub fn configure_system(
             last_addr.unchecked_offset_from(himem_start) + 1,
             E820_RAM,
         )?;
+        *num_e820_entries += 1;
     } else {
         add_e820_entry(
             &mut params.0,
@@ -270,6 +272,7 @@ pub fn configure_system(
             end_32bit_gap_start.unchecked_offset_from(himem_start),
             E820_RAM,
         )?;
+        *num_e820_entries += 1;
 
         if last_addr > first_addr_past_32bits {
             add_e820_entry(
@@ -280,6 +283,7 @@ pub fn configure_system(
                 last_addr.unchecked_offset_from(first_addr_past_32bits) + 1,
                 E820_RAM,
             )?;
+            *num_e820_entries += 1;
         }
     }
 
