@@ -9,7 +9,7 @@ use vm_memory::{
 use arch_gen::x86::bootparam::e820entry;
 
 use std::fs::File;
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom};
 
 const EFI_HOB_TYPE_HANDOFF: u64 = 0x0001;
 const EFI_HOB_TYPE_RESOURCE_DESCRIPTOR: u64 = 0x0003;
@@ -101,6 +101,9 @@ impl IntelTdx {
         ram_entries: &mut Vec<e820entry>,
         nr_ram_entries: &mut u64,
     ) -> Result<(), Error> {
+        let mut hob_section = &mut TdxFirmwareEntry::default();
+
+        // FIXME: TdxFirmwareEntry is missing the `attributes` field
         let mut sections: Vec<TdxFirmwareEntry> = self
             .tdvf_sections
             .iter()
@@ -114,97 +117,84 @@ impl IntelTdx {
             })
             .collect();
 
-        // TODO: still need to write the sections in the guest memory
+        let mut tdx_ram_entries = self.init_ram_entries(ram_entries);
+
+        // TODO: need to accept ram ranges for TempMem or TdHob
+        let mut firmware_file =
+            std::fs::File::open("/usr/share/edk2/ovmf/OVMF.inteltdx.fd").unwrap();
+        for section in &sections {
+            match section.r#type {
+                // put Bfv and Cfv sections into the memory regions on the guest
+                TdvfSectionType::Bfv | TdvfSectionType::Cfv => {
+                    firmware_file
+                        .seek(SeekFrom::Start(section.data_offset as u64))
+                        .unwrap();
+                    guest_mem
+                        .read_volatile_from(
+                            GuestAddress(section.address),
+                            &mut firmware_file,
+                            section.data_len as usize,
+                        )
+                        .unwrap();
+                }
+                TdvfSectionType::TdHob => {
+                    if let Err(e) = tdx_accept_ram_range(
+                        section.address,
+                        section.size,
+                        nr_ram_entries,
+                        &mut tdx_ram_entries,
+                    ) {
+                        return Err(e);
+                    }
+                }
+                TdvfSectionType::TempMem => {
+                    if let Err(e) = tdx_accept_ram_range(
+                        section.address,
+                        section.size,
+                        nr_ram_entries,
+                        &mut tdx_ram_entries,
+                    ) {
+                        return Err(e);
+                    }
+                }
+                _ => (),
+            }
+        }
+
+        tdx_ram_entries.sort_by_key(|entry| entry.addr);
+        tdx_ram_entries.reverse();
 
         for section in &sections {
+            match section.r#type {
+                TdvfSectionType::TdHob => {
+                    tdvf_hob_create(section, &tdx_ram_entries, *nr_ram_entries, guest_mem)?;
+                }
+                _ => (),
+            }
+        }
+
+        for section in &sections {
+            //           // TODO: we should be checking to see if the KVM_CAP_MEMORY_MAPPING capability is
+            //           // enabled, but for now just assume its not
             self.vm
                 .init_mem_region(
                     fd,
                     section.address,
                     section.size / 4096,
-                    if let tdx::tdvf::TdvfSectionType::Bfv = section.r#type { 1 } else { 0 },
-                    guest_mem.get_host_address(vm_memory::GuestAddress(section.address)).unwrap() as u64,
+                    if let tdx::tdvf::TdvfSectionType::Bfv = section.r#type {
+                        1
+                    } else {
+                        0
+                    },
+                    guest_mem
+                        .get_host_address(vm_memory::GuestAddress(section.address))
+                        .unwrap() as u64,
                 )
                 .unwrap();
+            //
+            //           // TODO: if the entry is of type TD_HOB or TEMP_MEM then we need to unmap the memory
+            //           // and set the mem_ptr to NULL (or 0 in this case)
         }
-
-        //       let hob_section = tdx::tdvf::get_hob_section(&self.tdvf_sections).unwrap();
-        //       let mut hob_section: Option<TdxFirmwareEntry> = None;
-        //       let mut hob_section = &mut TdxFirmwareEntry::default();
-        //
-        //       let mut sections: Vec<TdxFirmwareEntry> = self
-        //           .tdvf_sections
-        //           .iter()
-        //           .map(|s| TdxFirmwareEntry {
-        //               data_offset: s.data_offset,
-        //               data_len: s.raw_data_size,
-        //               address: s.memory_address,
-        //               size: s.memory_data_size,
-        //               r#type: s.section_type,
-        //               mem_ptr: 0,
-        //           })
-        //           .collect();
-        //
-        //       let mut tdx_ram_entries = self.init_ram_entries(ram_entries);
-        //
-        //       for mut section in &mut sections {
-        //           match section.r#type {
-        //               TdvfSectionType::Bfv | TdvfSectionType::Cfv => {
-        //                   let tdvf_ptr = core::ptr::from_ref(&self.tdvf_file) as usize;
-        //                   section.mem_ptr = tdvf_ptr.wrapping_add(section.data_offset as usize) as u64;
-        //               }
-        //               TdvfSectionType::TdHob | TdvfSectionType::TempMem => {
-        //                   let new_mmap_region = GuestRegionMmap::from_range(
-        //                       GuestAddress(section.address),
-        //                       section.size as usize,
-        //                       None,
-        //                   )
-        //                   .map_err(Error::CreateTdvfSectionGuestMemory)?;
-        //                   guest_mem
-        //                       .insert_region(std::sync::Arc::new(new_mmap_region))
-        //                       .map_err(Error::InsertTdvfSectionGuestMemory)?;
-        //                   section.mem_ptr = guest_mem
-        //                       .get_host_address(GuestAddress(section.address))
-        //                       .unwrap() as u64;
-        //
-        //                   if let Err(e) = tdx_accept_ram_range(
-        //                       section.address,
-        //                       section.size,
-        //                       nr_ram_entries,
-        //                       &mut tdx_ram_entries,
-        //                   ) {
-        //                       return Err(e);
-        //                   }
-        //
-        //                   if let TdvfSectionType::TdHob = section.r#type {
-        //                       // FIXME: I don't really like the way that this is being done...
-        //                       hob_section = section;
-        //                   }
-        //               }
-        //               _ => return Err(Error::InvalidTdvfSectionType),
-        //           }
-        //       }
-        //
-        //       tdx_ram_entries.sort_by_key(|entry| entry.addr);
-        //       tdx_ram_entries.reverse();
-        //
-        //       tdvf_hob_create(&hob_section, &tdx_ram_entries, *nr_ram_entries, guest_mem)?;
-        //
-        //       for section in &sections {
-        //           // TODO: we should be checking to see if the KVM_CAP_MEMORY_MAPPING capability is
-        //           // enabled, but for now just assume its not
-        //
-        //           // TODO: we also shouldn't be assuming that they all want to extend the measurement,
-        //           // but for now just do it
-        //
-        //           // TODO: we want to properly error check this
-        //           self.vm
-        //               .init_mem_region(fd, section.address, section.size / 4096, 1, section.mem_ptr)
-        //               .unwrap();
-        //
-        //           // TODO: if the entry is of type TD_HOB or TEMP_MEM then we need to unmap the memory
-        //           // and set the mem_ptr to NULL (or 0 in this case)
-        //       }
 
         Ok(())
     }
