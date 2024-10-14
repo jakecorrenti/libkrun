@@ -75,6 +75,7 @@ dependencies = [
  "kvm-ioctls",
  "libc",
  "smbios",
+ "tdx",
  "utils",
  "vm-fdt",
  "vm-memory",

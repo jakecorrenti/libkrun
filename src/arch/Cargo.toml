@@ -7,11 +7,14 @@ edition = "2021"
 [features]
 tee = []
 amd-sev = [ "tee" ]
+intel-tdx = [ "tee", "tdx" ]
 efi = []
 
 [dependencies]
 libc = ">=0.2.39"
 vm-memory = { version = ">=0.13", features = ["backend-mmap"] }
+
+tdx = { path = "../../../tdx", optional = true }
 
 arch_gen = { path = "../arch_gen" }
 smbios = { path = "../smbios" }

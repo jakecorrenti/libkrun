@@ -132,7 +132,31 @@ pub fn arch_memory_regions(
 ) -> (ArchMemoryInfo, Vec<(GuestAddress, usize)>) {
     let page_size: usize = unsafe { libc::sysconf(libc::_SC_PAGESIZE).try_into().unwrap() };
 
+    #[cfg(feature = "intel-tdx")]
+    let mut firmware = std::fs::File::open("/usr/share/edk2/ovmf/OVMF.inteltdx.fd").unwrap();
+    #[cfg(feature = "intel-tdx")]
+    let mut tdvf_sections = tdx::tdvf::parse_sections(&mut firmware).unwrap();
+    #[cfg(feature = "intel-tdx")]
+    tdvf_sections.retain(|&s| match s.section_type {
+        tdx::tdvf::TdvfSectionType::Bfv | tdx::tdvf::TdvfSectionType::Cfv => true,
+        _ => false,
+    });
+
+    #[cfg(feature = "intel-tdx")]
+    let addrs = tdvf_sections
+        .iter()
+        .map(|&s| (GuestAddress(s.memory_address), s.memory_data_size as usize))
+        .collect::<Vec<_>>();
+    #[cfg(feature = "intel-tdx")]
+    println!("addrs: {:#?}", addrs);
+
     let size = round_up(size, page_size);
+    println!("size: {:x}", size);
+    println!(
+        "kernel_load_addr {:x}, kernel_end_addr {:x}",
+        kernel_load_addr,
+        kernel_load_addr + kernel_size as u64
+    );
     if size < (kernel_load_addr + kernel_size as u64) as usize {
         panic!("Kernel doesn't fit in RAM");
     }
@@ -149,7 +173,11 @@ pub fn arch_memory_regions(
                 shm_start_addr,
                 vec![
                     (GuestAddress(0), size),
-                    (GuestAddress(BIOS_START), BIOS_SIZE),
+                    #[cfg(feature = "intel-tdx")]
+                    addrs[1],
+                    #[cfg(feature = "intel-tdx")]
+                    addrs[0],
+                    // (GuestAddress(BIOS_START), BIOS_SIZE),
                 ],
             )
         }
