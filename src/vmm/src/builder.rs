@@ -551,7 +551,7 @@ pub fn build_microvm(
     // while on aarch64 we need to do it the other way around.
     #[cfg(target_arch = "x86_64")]
     {
-        // setup_interrupt_controller(&vm)?;
+        setup_interrupt_controller(&vm)?;
         attach_legacy_devices(&vm, &mut pio_device_manager)?;
 
         vcpus = create_vcpus_x86_64(
@@ -807,26 +807,34 @@ fn load_payload(
             initrd_host_addr,
             initrd_size,
         ) => {
+            println!("kernel_region: {:#?}", kernel_region);
+            println!("kernel_load_addr: {:#?}", kernel_load_addr);
+            println!("kernel_size: {:#?}", kernel_size);
+            println!("qboot_host_addr: {:#?}", qboot_host_addr);
+            println!("qboot_size: {:#?}", qboot_size);
+            println!("initrd_host_addr: {:#?}", initrd_host_addr);
+            println!("initrd_size: {:#?}", initrd_size);
             let kernel_data =
                 unsafe { std::slice::from_raw_parts(kernel_region.as_ptr(), kernel_size) };
             guest_mem
                 .write(kernel_data, GuestAddress(kernel_load_addr))
                 .unwrap();
 
-            let qboot_data =
-                unsafe { std::slice::from_raw_parts(qboot_host_addr as *mut u8, qboot_size) };
-            guest_mem
-                .write(qboot_data, GuestAddress(arch::BIOS_START))
-                .unwrap();
+   //        let qboot_data =
+   //            unsafe { std::slice::from_raw_parts(qboot_host_addr as *mut u8, qboot_size) };
+   //        guest_mem
+   //            .write(qboot_data, GuestAddress(arch::BIOS_START))
+   //            .unwrap();
 
-            let initrd_data =
-                unsafe { std::slice::from_raw_parts(initrd_host_addr as *mut u8, initrd_size) };
-            guest_mem
-                .write(
-                    initrd_data,
-                    GuestAddress(arch::x86_64::layout::INITRD_SEV_START),
-                )
-                .unwrap();
+           //println!("INITRD_SEV_START: {:#?}", arch::x86_64::layout::INITRD_SEV_START);
+           //let initrd_data =
+           //    unsafe { std::slice::from_raw_parts(initrd_host_addr as *mut u8, initrd_size) };
+           //guest_mem
+           //    .write(
+           //        initrd_data,
+           //        GuestAddress(arch::x86_64::layout::INITRD_SEV_START),
+           //    )
+           //    .unwrap();
             Ok(guest_mem)
         }
         #[cfg(feature = "efi")]

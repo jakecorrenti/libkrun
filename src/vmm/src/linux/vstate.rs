@@ -811,13 +811,14 @@ impl Vm {
     /// Creates the irq chip and an in-kernel device model for the PIT.
     #[cfg(target_arch = "x86_64")]
     pub fn setup_irqchip(&self) -> Result<()> {
-        self.fd.create_irq_chip().map_err(Error::VmSetup)?;
+        // self.fd.create_irq_chip().map_err(Error::VmSetup)?;
         let pit_config = kvm_pit_config {
             // We need to enable the emulation of a dummy speaker port stub so that writing to port
             // 0x61 (i.e. KVM_SPEAKER_BASE_ADDRESS) does not trigger an exit to user space.
             flags: KVM_PIT_SPEAKER_DUMMY,
             ..Default::default()
         };
+        println!("WE ARE SETTING UP THE IRQCHIP");
         self.fd.create_pit2(pit_config).map_err(Error::VmSetup)
     }
 
@@ -846,6 +847,7 @@ impl Vm {
     #[cfg(target_arch = "x86_64")]
     /// Saves and returns the Kvm Vm state.
     pub fn save_state(&self) -> Result<VmState> {
+        println!("!! saving state");
         let pitstate = self.fd.get_pit2().map_err(Error::VmGetPit2)?;
 
         let mut clock = self.fd.get_clock().map_err(Error::VmGetClock)?;
@@ -889,6 +891,7 @@ impl Vm {
     #[cfg(target_arch = "x86_64")]
     /// Restores the Kvm Vm state.
     pub fn restore_state(&self, state: &VmState) -> Result<()> {
+        println!("!! restoring state");
         self.fd
             .set_pit2(&state.pitstate)
             .map_err(Error::VmSetPit2)?;
@@ -1424,6 +1427,9 @@ impl Vcpu {
                 match e.errno() {
                     libc::EAGAIN => Ok(VcpuEmulation::Handled),
                     libc::EINTR => {
+                        // NOTE: after the first interrupt, this will set the `immediate_exit`
+                        // value to 0, meaning the hypervisor won't immediately exit the guest. It
+                        // will allow the guest to handle the interrupt before taking control back. 
                         self.fd.set_kvm_immediate_exit(0);
                         // Notify that this KVM_RUN was interrupted.
                         Ok(VcpuEmulation::Interrupted)
@@ -1452,11 +1458,18 @@ impl Vcpu {
         // This loop is here just for optimizing the emulation path.
         // No point in ticking the state machine if there are no external events.
         loop {
+            println!("{} calling `running`", self.cpu_index());
+            println!("{} kvm_run: {:?}", self.cpu_index(), self.fd.get_kvm_run());
             match self.run_emulation() {
                 // Emulation ran successfully, continue.
-                Ok(VcpuEmulation::Handled) => (),
+                Ok(VcpuEmulation::Handled) => {
+                    println!("{} exited run_emulation: handled", self.cpu_index());
+                },
                 // Emulation was interrupted, check external events.
-                Ok(VcpuEmulation::Interrupted) => break,
+                Ok(VcpuEmulation::Interrupted) => {
+                    println!("{} exited run_emulation: interrupted", self.cpu_index());
+                    break
+                },
                 // If the guest was rebooted or halted:
                 // - vCPU0 will always exit out of `KVM_RUN` with KVM_EXIT_SHUTDOWN or
                 //   KVM_EXIT_HLT.
@@ -1464,12 +1477,20 @@ impl Vcpu {
                 // Moreover if we allow the vCPU0 thread to finish execution, this might generate a
                 // seccomp failure because musl calls `sigprocmask` as part of `pthread_exit`.
                 // So we pause vCPU0 and send a signal to the emulation thread to stop the VMM.
-                Ok(VcpuEmulation::Stopped) => return self.exit(FC_EXIT_CODE_OK),
+                Ok(VcpuEmulation::Stopped) => {
+                    println!("{} exited run_emulation: stopped", self.cpu_index());
+                    return self.exit(FC_EXIT_CODE_OK)
+                },
                 // Emulation errors lead to vCPU exit.
-                Err(_) => return self.exit(FC_EXIT_CODE_GENERIC_ERROR),
+                Err(_) => {
+                    println!("{} exited run_emulation: error", self.cpu_index());
+                    return self.exit(FC_EXIT_CODE_GENERIC_ERROR)
+                },
             }
         }
 
+        println!("{} broke out of running loop", self.cpu_index());
+        // println!("{} kvm_run: {:?}", self.cpu_index(), self.fd.get_kvm_run());
         // By default don't change state.
         let mut state = StateMachine::next(Self::running);
 
@@ -1477,6 +1498,7 @@ impl Vcpu {
         match self.event_receiver.try_recv() {
             // Running ---- Pause ----> Paused
             Ok(VcpuEvent::Pause) => {
+                println!("in the puase vcpu event");
                 // Nothing special to do.
                 self.response_sender
                     .send(VcpuResponse::Paused)
@@ -1489,17 +1511,19 @@ impl Vcpu {
                 state = StateMachine::next(Self::paused);
             }
             Ok(VcpuEvent::Resume) => {
+                println!("in the resume vcpu event");
                 self.response_sender
                     .send(VcpuResponse::Resumed)
                     .expect("failed to send resume status");
             }
             // Unhandled exit of the other end.
             Err(TryRecvError::Disconnected) => {
+                println!("in the disconnected vcpu event");
                 // Move to 'exited' state.
                 state = self.exit(FC_EXIT_CODE_GENERIC_ERROR);
             }
             // All other events or lack thereof have no effect on current 'running' state.
-            Err(TryRecvError::Empty) => (),
+            Err(TryRecvError::Empty) => println!("in the empty vcpu event"),
         }
 
         state

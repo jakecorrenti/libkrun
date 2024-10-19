@@ -226,6 +226,8 @@ impl Vmm {
                 .push(vcpu.start_threaded().map_err(Error::VcpuHandle)?);
         }
 
+        println!("are we even getting to this point in the start vcpus bit");
+
         // The vcpus start off in the `Paused` state, let them run.
         self.resume_vcpus()?;
 
@@ -249,6 +251,7 @@ impl Vmm {
                 _ => return Err(Error::VcpuResume),
             }
         }
+        println!("vcpus successfully resumed");
         Ok(())
     }
 
