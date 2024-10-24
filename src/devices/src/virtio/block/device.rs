@@ -97,8 +97,8 @@ impl DiskProperties {
                 },
             )
             .unwrap();
-            println!("Qcow2File::from(disk_image): {:?}", q);
-            panic!("Unsupported disk image format: Qcow2");
+            // println!("Qcow2File::from(disk_image): {:?}", q);
+            // panic!("Unsupported disk image format: Qcow2");
             Ok(Self {
                 cache_type,
                 nsectors: disk_size >> SECTOR_SHIFT,

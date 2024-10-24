@@ -4,6 +4,7 @@ use crate::virtio::block::disk::base::descriptor::{
 };
 use serde::Serializer;
 use std::cell::RefCell;
+use std::cmp::min;
 use std::mem::MaybeUninit;
 use std::os::unix::fs::FileExt;
 
@@ -433,7 +434,18 @@ pub(crate) fn file_write_zeroes_at(
     offset: u64,
     length: usize,
 ) -> std::io::Result<usize> {
-    todo!();
+    // fall back to write()
+    // fallocate() failed; fall back to writing a buffer of zeroes
+    // until we have written up to length.
+    let buf_size = min(length, 0x10000);
+    let buf = vec![0u8; buf_size];
+    let mut nwritten: usize = 0;
+    while nwritten < length {
+        let remaining = length - nwritten;
+        let write_size = min(remaining, buf_size);
+        nwritten += file.write_at(&buf[0..write_size], offset + nwritten as u64)?;
+    }
+    Ok(length)
 }
 
 /// THIS IS A LINUX IMPLEMENTATION... THE CROSVM MAC IMPLEMENTATION WAS A TODO!()
@@ -442,7 +454,19 @@ pub(crate) fn file_punch_hole(
     offset: u64,
     length: u64,
 ) -> std::io::Result<()> {
-    todo!();
+    if crate::virtio::block::disk::base::sys::linux::is_block_file(file)? {
+        Ok(crate::virtio::block::disk::base::sys::linux::discard_block(
+            file, offset, length,
+        )?)
+    } else {
+        crate::virtio::block::disk::base::sys::linux::fallocate(
+            file,
+            crate::virtio::block::disk::base::sys::linux::FallocateMode::PunchHole,
+            offset,
+            length,
+        )
+        .map_err(|e| std::io::Error::from_raw_os_error(e.errno()))
+    }
 }
 
 impl WriteZeroesAt for std::fs::File {

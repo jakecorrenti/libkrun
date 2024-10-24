@@ -1,10 +1,13 @@
 use super::super::errno::Result;
+use crate::syscall;
 use crate::virtio::block::disk::base::descriptor::{
-    FromRawDescriptor, RawDescriptor, SafeDescriptor,
+    AsRawDescriptor, FromRawDescriptor, RawDescriptor, SafeDescriptor,
 };
 use std::fs::File;
 use std::os::unix::io::RawFd;
 use std::path::Path;
+
+use crate::virtio::block::disk::base::MaybeUninit;
 
 /// The operation to perform with `flock`.
 pub enum FlockOperation {
@@ -105,4 +108,98 @@ pub fn validate_raw_fd(raw_fd: &RawFd) -> Result<RawFd> {
         return Err(crate::virtio::block::disk::base::errno::Error::last());
     }
     Ok(dup_fd as RawFd)
+}
+
+/// Safe wrapper for `fstat()`.
+pub fn fstat<F: AsRawDescriptor>(f: &F) -> Result<libc::stat64> {
+    let mut st = MaybeUninit::<libc::stat64>::zeroed();
+
+    // SAFETY:
+    // Safe because the kernel will only write data in `st` and we check the return
+    // value.
+    syscall!(unsafe { libc::fstat64(f.as_raw_descriptor(), st.as_mut_ptr()) })?;
+
+    // SAFETY:
+    // Safe because the kernel guarantees that the struct is now fully initialized.
+    Ok(unsafe { st.assume_init() })
+}
+
+/// The operation to perform with `fallocate`.
+pub enum FallocateMode {
+    PunchHole,
+    ZeroRange,
+    Allocate,
+}
+
+impl From<FallocateMode> for i32 {
+    fn from(value: FallocateMode) -> Self {
+        match value {
+            FallocateMode::Allocate => libc::FALLOC_FL_KEEP_SIZE,
+            FallocateMode::PunchHole => libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+            FallocateMode::ZeroRange => libc::FALLOC_FL_ZERO_RANGE | libc::FALLOC_FL_KEEP_SIZE,
+        }
+    }
+}
+
+impl From<FallocateMode> for u32 {
+    fn from(value: FallocateMode) -> Self {
+        Into::<i32>::into(value) as u32
+    }
+}
+
+/// Safe wrapper for `fallocate()`.
+pub fn fallocate<F: AsRawDescriptor>(
+    file: &F,
+    mode: FallocateMode,
+    offset: u64,
+    len: u64,
+) -> crate::virtio::block::disk::base::errno::Result<()> {
+    let offset = if offset > libc::off64_t::MAX as u64 {
+        return Err(crate::virtio::block::disk::base::errno::Error::new(
+            libc::EINVAL,
+        ));
+    } else {
+        offset as libc::off64_t
+    };
+
+    let len = if len > libc::off64_t::MAX as u64 {
+        return Err(crate::virtio::block::disk::base::errno::Error::new(
+            libc::EINVAL,
+        ));
+    } else {
+        len as libc::off64_t
+    };
+
+    // SAFETY:
+    // Safe since we pass in a valid fd and fallocate mode, validate offset and len,
+    // and check the return value.
+    syscall!(unsafe { libc::fallocate64(file.as_raw_descriptor(), mode.into(), offset, len) })
+        .map(|_| ())
+}
+
+/// Checks whether a file is a block device fie or not.
+pub fn is_block_file<F: AsRawDescriptor>(
+    file: &F,
+) -> crate::virtio::block::disk::base::errno::Result<bool> {
+    let stat = fstat(file)?;
+    Ok((stat.st_mode & libc::S_IFMT) == libc::S_IFBLK)
+}
+
+const BLOCK_IO_TYPE: u32 = 0x12;
+crate::ioctl_io_nr!(BLKDISCARD, BLOCK_IO_TYPE, 119);
+
+/// Discards the given range of a block file.
+pub fn discard_block<F: AsRawDescriptor>(
+    file: &F,
+    offset: u64,
+    len: u64,
+) -> crate::virtio::block::disk::base::errno::Result<()> {
+    let range: [u64; 2] = [offset, len];
+    // SAFETY:
+    // Safe because
+    // - we check the return value.
+    // - ioctl(BLKDISCARD) does not hold the descriptor after the call.
+    // - ioctl(BLKDISCARD) does not break the file descriptor.
+    // - ioctl(BLKDISCARD) does not modify the given range.
+    syscall!(unsafe { libc::ioctl(file.as_raw_descriptor(), BLKDISCARD, &range) }).map(|_| ())
 }
