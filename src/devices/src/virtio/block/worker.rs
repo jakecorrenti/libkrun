@@ -246,7 +246,7 @@ impl BlockWorker {
                 CacheType::Writeback => {
                     let diskfile = self.disk.file_mut();
                     diskfile.flush().map_err(RequestError::FlushingToDisk)?;
-                    diskfile.sync_all().map_err(RequestError::FlushingToDisk)?;
+                    diskfile.sync().map_err(RequestError::FlushingToDisk)?;
                     Ok(0)
                 }
                 CacheType::Unsafe => Ok(0),

@@ -24,7 +24,7 @@ use utils::eventfd::{EventFd, EFD_NONBLOCK};
 use virtio_bindings::{
     virtio_blk::*, virtio_config::VIRTIO_F_VERSION_1, virtio_ring::VIRTIO_RING_F_EVENT_IDX,
 };
-use vm_memory::{ByteValued, GuestMemoryMmap};
+use vm_memory::{ByteValued, GuestMemoryMmap, VolatileMemory, VolatileSlice};
 
 use super::worker::BlockWorker;
 use super::{
@@ -34,6 +34,13 @@ use super::{
 
 use crate::legacy::Gic;
 use crate::virtio::{block::disk, ActivateError};
+
+use imago::file::File as ImagoFile;
+use imago::format::drivers::FormatDriverInstance;
+use imago::qcow2::Qcow2;
+use imago::SyncFormatAccess;
+use libc::iovec;
+use crate::virtio::file_traits::FileReadWriteAtVolatile;
 
 /// Configuration options for disk caching.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -51,9 +58,36 @@ pub enum CacheType {
 /// Helper object for setting up all `Block` fields derived from its backing file.
 pub(crate) struct DiskProperties {
     cache_type: CacheType,
-    pub(crate) file: File,
+    // pub(crate) file: File,
+    pub(crate) file: imago::SyncFormatAccess<imago::file::File>,
     nsectors: u64,
     image_id: Vec<u8>,
+}
+
+impl FileReadWriteAtVolatile for imago::SyncFormatAccess<imago::file::File> {
+    fn read_at_volatile(&self, slice: VolatileSlice, offset: u64) -> io::Result<usize> {
+        // let size_to_read = slice.len();
+        // let bytes = slice.get_slice(offset as usize, size_to_read).unwrap();
+        // let ptr = bytes.ptr_guard().as_ptr();
+        // let mut slice: &[u8] = unsafe { std::slice::from_raw_parts(ptr, size_to_read) };
+        // let iovec = imago::io_buffers::IoVectorMut::from(slice);
+        let slices = &[&slice];
+        let iovec = imago::io_buffers::IoVectorMut::from_volatile_slice(slices);
+        self.readv(iovec.0, offset)?;
+        Ok(slice.len())
+    }
+
+    fn write_at_volatile(&self, slice: VolatileSlice, offset: u64) -> io::Result<usize> {
+        // let size_to_write = slice.len();
+        // let bytes = slice.get_slice(offset as usize, size_to_write).unwrap();
+        // let ptr = bytes.ptr_guard_mut().as_ptr();
+        // let mut slice: &[u8] = unsafe { std::slice::from_raw_parts(ptr, size_to_write) };
+        // let iovec = imago::io_buffers::IoVector::from(slice);
+        let slices = &[&slice];
+        let iovec = imago::io_buffers::IoVector::from_volatile_slice(slices);
+        self.writev(iovec.0, offset)?;
+        Ok(slice.len())
+    }
 }
 
 impl DiskProperties {
@@ -66,13 +100,14 @@ impl DiskProperties {
             .read(true)
             .write(!is_disk_read_only)
             .open(PathBuf::from(&disk_image_path))?;
-        let disk_size = disk_image.seek(SeekFrom::End(0))?;
+        // let disk_size = disk_image.seek(SeekFrom::End(0))?;
+        let disk_image_id = Self::build_disk_image_id(&disk_image);
 
-        let image_type = disk::detect_image_type(&disk_image, false).unwrap();
-        if let disk::ImageType::Qcow2 = image_type {
-            println!("howdy doody");
-            panic!("the format of the disk image is a qcow2. we don't know what to do with that.");
-        }
+        let mut qcow_disk_image =
+            Qcow2::<imago::file::File>::open_path_sync(disk_image_path, !is_disk_read_only)?;
+        qcow_disk_image.open_implicit_dependencies_sync()?;
+        let qcow_disk_image = SyncFormatAccess::new(qcow_disk_image)?;
+        let disk_size = qcow_disk_image.size();
 
         // We only support disk size, which uses the first two words of the configuration space.
         // If the image is not a multiple of the sector size, the tail bits are not exposed.
@@ -84,15 +119,24 @@ impl DiskProperties {
             );
         }
 
+        // let image_type = disk::detect_image_type(&disk_image, false).unwrap();
+        // if let disk::ImageType::Qcow2 = image_type {
+        //     let mut qcow_disk_image =
+        //         Qcow2::<imago::file::File>::open_image_sync(file.into(), !is_disk_read_only)?;
+        //     qcow_disk_image.open_implicit_dependencies_sync()?;
+        //
+        //     panic!("the format of the disk image is a qcow2. we don't know what to do with that.");
+        // }
+
         Ok(Self {
             cache_type,
             nsectors: disk_size >> SECTOR_SHIFT,
-            image_id: Self::build_disk_image_id(&disk_image),
-            file: disk_image,
+            image_id: disk_image_id,
+            file: qcow_disk_image,
         })
     }
 
-    pub fn file_mut(&mut self) -> &mut File {
+    pub fn file_mut(&mut self) -> &mut SyncFormatAccess<imago::file::File> {
         &mut self.file
     }
 
@@ -143,11 +187,11 @@ impl Drop for DiskProperties {
         match self.cache_type {
             CacheType::Writeback => {
                 // flush() first to force any cached data out.
-                if self.file.flush().is_err() {
+                if self.file_mut().flush().is_err() {
                     error!("Failed to flush block data on drop.");
                 }
                 // Sync data out to physical media on host.
-                if self.file.sync_all().is_err() {
+                if self.file_mut().sync().is_err() {
                     error!("Failed to sync block data on drop.")
                 }
             }
