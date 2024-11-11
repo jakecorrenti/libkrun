@@ -192,6 +192,7 @@ impl MmioTransport {
                 // If the backend device driver doesn't support reset,
                 // just leave the device marked as FAILED.
                 if self.device_status & FAILED == 0 {
+                    debug!("about to do a reset");
                     self.reset();
                 }
             }

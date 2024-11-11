@@ -35,12 +35,12 @@ use super::{
 use crate::legacy::Gic;
 use crate::virtio::{block::disk, ActivateError};
 
+use crate::virtio::file_traits::FileReadWriteAtVolatile;
 use imago::file::File as ImagoFile;
 use imago::format::drivers::FormatDriverInstance;
 use imago::qcow2::Qcow2;
 use imago::SyncFormatAccess;
 use libc::iovec;
-use crate::virtio::file_traits::FileReadWriteAtVolatile;
 
 /// Configuration options for disk caching.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -66,11 +66,6 @@ pub(crate) struct DiskProperties {
 
 impl FileReadWriteAtVolatile for imago::SyncFormatAccess<imago::file::File> {
     fn read_at_volatile(&self, slice: VolatileSlice, offset: u64) -> io::Result<usize> {
-        // let size_to_read = slice.len();
-        // let bytes = slice.get_slice(offset as usize, size_to_read).unwrap();
-        // let ptr = bytes.ptr_guard().as_ptr();
-        // let mut slice: &[u8] = unsafe { std::slice::from_raw_parts(ptr, size_to_read) };
-        // let iovec = imago::io_buffers::IoVectorMut::from(slice);
         let slices = &[&slice];
         let iovec = imago::io_buffers::IoVectorMut::from_volatile_slice(slices);
         self.readv(iovec.0, offset)?;
@@ -78,11 +73,6 @@ impl FileReadWriteAtVolatile for imago::SyncFormatAccess<imago::file::File> {
     }
 
     fn write_at_volatile(&self, slice: VolatileSlice, offset: u64) -> io::Result<usize> {
-        // let size_to_write = slice.len();
-        // let bytes = slice.get_slice(offset as usize, size_to_write).unwrap();
-        // let ptr = bytes.ptr_guard_mut().as_ptr();
-        // let mut slice: &[u8] = unsafe { std::slice::from_raw_parts(ptr, size_to_write) };
-        // let iovec = imago::io_buffers::IoVector::from(slice);
         let slices = &[&slice];
         let iovec = imago::io_buffers::IoVector::from_volatile_slice(slices);
         self.writev(iovec.0, offset)?;
@@ -100,13 +90,14 @@ impl DiskProperties {
             .read(true)
             .write(!is_disk_read_only)
             .open(PathBuf::from(&disk_image_path))?;
-        // let disk_size = disk_image.seek(SeekFrom::End(0))?;
+
         let disk_image_id = Self::build_disk_image_id(&disk_image);
 
         let mut qcow_disk_image =
             Qcow2::<imago::file::File>::open_path_sync(disk_image_path, !is_disk_read_only)?;
         qcow_disk_image.open_implicit_dependencies_sync()?;
         let qcow_disk_image = SyncFormatAccess::new(qcow_disk_image)?;
+
         let disk_size = qcow_disk_image.size();
 
         // We only support disk size, which uses the first two words of the configuration space.
@@ -118,15 +109,6 @@ impl DiskProperties {
                 disk_size, SECTOR_SIZE
             );
         }
-
-        // let image_type = disk::detect_image_type(&disk_image, false).unwrap();
-        // if let disk::ImageType::Qcow2 = image_type {
-        //     let mut qcow_disk_image =
-        //         Qcow2::<imago::file::File>::open_image_sync(file.into(), !is_disk_read_only)?;
-        //     qcow_disk_image.open_implicit_dependencies_sync()?;
-        //
-        //     panic!("the format of the disk image is a qcow2. we don't know what to do with that.");
-        // }
 
         Ok(Self {
             cache_type,
@@ -397,12 +379,18 @@ impl VirtioDevice for Block {
 
         let disk = match self.disk.take() {
             Some(d) => d,
-            None => DiskProperties::new(
-                self.disk_image_path.clone(),
-                self.is_disk_read_only,
-                self.cache_type,
-            )
-            .map_err(|_| ActivateError::BadActivate)?,
+            None => {
+                // it looks like after we decompress the kernel and get those 4 warn messages like
+                // before... unlike freezing like it would prior, we are hitting this panic... so i
+                // wonder if the idea that Hanna had will actually fix this... let's give it a go!
+                // panic!("we are here");
+                DiskProperties::new(
+                    self.disk_image_path.clone(),
+                    self.is_disk_read_only,
+                    self.cache_type,
+                )
+                .map_err(|_| ActivateError::BadActivate)?
+            }
         };
 
         let worker = BlockWorker::new(
@@ -423,6 +411,7 @@ impl VirtioDevice for Block {
     }
 
     fn reset(&mut self) -> bool {
+        debug!("calling reset in impl VirtioDevice for Block");
         if let Some(worker) = self.worker_thread.take() {
             let _ = self.worker_stopfd.write(1);
             if let Err(e) = worker.join() {

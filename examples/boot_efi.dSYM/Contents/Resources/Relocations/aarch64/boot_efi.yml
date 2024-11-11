@@ -1,20 +1,5 @@
 ---
 triple:          'arm64-apple-darwin'
 binary-path:     boot_efi
-relocations:
-  - { offsetInCU: 0x26, offset: 0x26, size: 0x8, addend: 0x0, symName: _parse_cmdline, symObjAddr: 0x0, symBinAddr: 0x1000034E0, symSize: 0x134 }
-  - { offsetInCU: 0x52, offset: 0x52, size: 0x8, addend: 0x0, symName: _long_options, symObjAddr: 0x978, symBinAddr: 0x1000040E8, symSize: 0x0 }
-  - { offsetInCU: 0x120, offset: 0x120, size: 0x8, addend: 0x0, symName: _parse_cmdline, symObjAddr: 0x0, symBinAddr: 0x1000034E0, symSize: 0x134 }
-  - { offsetInCU: 0x190, offset: 0x190, size: 0x8, addend: 0x0, symName: _connect_to_passt, symObjAddr: 0x134, symBinAddr: 0x100003614, symSize: 0xD8 }
-  - { offsetInCU: 0x1D3, offset: 0x1D3, size: 0x8, addend: 0x0, symName: _parse_cmdline.cold.1, symObjAddr: 0x564, symBinAddr: 0x100003A54, symSize: 0x28 }
-  - { offsetInCU: 0x1EA, offset: 0x1EA, size: 0x8, addend: 0x0, symName: _connect_to_passt, symObjAddr: 0x134, symBinAddr: 0x100003614, symSize: 0xD8 }
-  - { offsetInCU: 0x2EB, offset: 0x2EB, size: 0x8, addend: 0x0, symName: _listen_shutdown_request, symObjAddr: 0x20C, symBinAddr: 0x1000036EC, symSize: 0x17C }
-  - { offsetInCU: 0x64C, offset: 0x64C, size: 0x8, addend: 0x0, symName: _main, symObjAddr: 0x388, symBinAddr: 0x100003868, symSize: 0x1DC }
-  - { offsetInCU: 0x9F7, offset: 0x9F7, size: 0x8, addend: 0x0, symName: _main.cold.2, symObjAddr: 0x5B4, symBinAddr: 0x100003AA4, symSize: 0x28 }
-  - { offsetInCU: 0xA1F, offset: 0xA1F, size: 0x8, addend: 0x0, symName: _main.cold.5, symObjAddr: 0x62C, symBinAddr: 0x100003B1C, symSize: 0x28 }
-  - { offsetInCU: 0xA36, offset: 0xA36, size: 0x8, addend: 0x0, symName: _main.cold.1, symObjAddr: 0x58C, symBinAddr: 0x100003A7C, symSize: 0x28 }
-  - { offsetInCU: 0xA4D, offset: 0xA4D, size: 0x8, addend: 0x0, symName: _main.cold.4, symObjAddr: 0x604, symBinAddr: 0x100003AF4, symSize: 0x28 }
-  - { offsetInCU: 0xA64, offset: 0xA64, size: 0x8, addend: 0x0, symName: _main.cold.3, symObjAddr: 0x5DC, symBinAddr: 0x100003ACC, symSize: 0x28 }
-  - { offsetInCU: 0xA7B, offset: 0xA7B, size: 0x8, addend: 0x0, symName: _OUTLINED_FUNCTION_0, symObjAddr: 0x654, symBinAddr: 0x100003A44, symSize: 0x8 }
-  - { offsetInCU: 0xA92, offset: 0xA92, size: 0x8, addend: 0x0, symName: _OUTLINED_FUNCTION_1, symObjAddr: 0x65C, symBinAddr: 0x100003A4C, symSize: 0x8 }
+relocations:     []
 ...

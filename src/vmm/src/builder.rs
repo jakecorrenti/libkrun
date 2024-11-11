@@ -744,6 +744,7 @@ pub fn build_microvm(
         println!("Starting TEE/microVM.");
     }
 
+    // panic!("not starting the vcpus");
     vmm.start_vcpus(vcpus)
         .map_err(StartMicrovmError::Internal)?;
 
@@ -1173,6 +1174,8 @@ fn attach_mmio_device(
         .device_type();
     let _cmdline = &mut vmm.kernel_cmdline;
 
+    println!("attaching id: {}", id);
+
     #[cfg(target_os = "linux")]
     let (_mmio_base, _irq) =
         vmm.mmio_device_manager
@@ -1434,6 +1437,7 @@ fn attach_block_devices(
 
     for block in block_devs.list.iter() {
         let id = String::from(block.lock().unwrap().id());
+        println!("block id: {}", id);
 
         if let Some(ref intc) = intc {
             block.lock().unwrap().set_intc(intc.clone());
