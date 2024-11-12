@@ -123,12 +123,25 @@ impl DiskProperties {
 
         let disk_image_id = Self::build_disk_image_id(&disk_image);
 
-        let mut qcow_disk_image =
-            Qcow2::<imago::file::File>::open_path_sync(disk_image_path, !is_disk_read_only)?;
-        qcow_disk_image.open_implicit_dependencies_sync()?;
-        let qcow_disk_image = SyncFormatAccess::new(qcow_disk_image)?;
+        let image_type = disk::detect_image_type(&disk_image, false).unwrap();
 
-        let disk_size = qcow_disk_image.size();
+        let mut disk_image: SyncFormatAccess<imago::file::File>;
+        match image_type {
+            disk::ImageType::Qcow2 => {
+                let mut qcow_disk_image = Qcow2::<imago::file::File>::open_path_sync(
+                    disk_image_path,
+                    !is_disk_read_only,
+                )?;
+                qcow_disk_image.open_implicit_dependencies_sync()?;
+                disk_image = SyncFormatAccess::new(qcow_disk_image)?;
+            }
+            disk::ImageType::Raw => {
+                let mut raw = imago::raw::Raw::open_path_sync(disk_image_path, !is_disk_read_only)?;
+                disk_image = SyncFormatAccess::new(raw)?;
+            }
+        }
+
+        let disk_size = disk_image.size();
 
         // We only support disk size, which uses the first two words of the configuration space.
         // If the image is not a multiple of the sector size, the tail bits are not exposed.
@@ -144,7 +157,7 @@ impl DiskProperties {
             cache_type,
             nsectors: disk_size >> SECTOR_SHIFT,
             image_id: disk_image_id,
-            file: qcow_disk_image,
+            file: disk_image,
         })
     }
 
