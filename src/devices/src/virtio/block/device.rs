@@ -72,11 +72,41 @@ impl FileReadWriteAtVolatile for imago::SyncFormatAccess<imago::file::File> {
         Ok(slice.len())
     }
 
+    fn read_vectored_at_volatile(&self, bufs: &[VolatileSlice], offset: u64) -> io::Result<usize> {
+        if bufs.is_empty() {
+            return Ok(0);
+        }
+
+        let mut o = offset as usize;
+        let mut read = 0;
+        for b in bufs {
+            let bytes = self.read_at_volatile(*b, o as u64)?;
+            o += bytes;
+            read += bytes;
+        }
+        Ok(read)
+    }
+
     fn write_at_volatile(&self, slice: VolatileSlice, offset: u64) -> io::Result<usize> {
         let slices = &[&slice];
         let iovec = imago::io_buffers::IoVector::from_volatile_slice(slices);
         self.writev(iovec.0, offset)?;
         Ok(slice.len())
+    }
+
+    fn write_vectored_at_volatile(&self, bufs: &[VolatileSlice], offset: u64) -> io::Result<usize> {
+        if bufs.is_empty() {
+            return Ok(0);
+        }
+
+        let mut o = offset as usize;
+        let mut written = 0;
+        for b in bufs {
+            let bytes = self.write_at_volatile(*b, o as u64)?;
+            o += bytes;
+            written += bytes;
+        }
+        Ok(written)
     }
 }
 
