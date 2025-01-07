@@ -4,6 +4,7 @@ LDFLAGS_x86_64_Linux = -lkrun
 LDFLAGS_aarch64_Linux = -lkrun
 LDFLAGS_arm64_Darwin = -L/opt/homebrew/lib -lkrun
 LDFLAGS_sev = -lkrun-sev
+LDFLAGS_nitro = -lkrun-nitro
 LDFLAGS_efi = -L/opt/homebrew/lib -lkrun-efi
 CFLAGS = -O2 -g -I../include
 ROOTFS_DISTRO := fedora
@@ -18,6 +19,9 @@ endif
 ifeq ($(EFI),1)
     EXAMPLES := boot_efi
 endif
+ifeq ($(NITRO),1)
+	EXAMPLES := nitro
+endif
 
 all: $(EXAMPLES)
 
@@ -29,6 +33,9 @@ endif
 
 launch-tee: launch-tee.c
 	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_sev)
+
+nitro: nitro.c
+	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_nitro)
 
 boot_efi: boot_efi.c
 	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_efi)
@@ -44,4 +51,4 @@ rootfs:
 	podman rm libkrun_chroot_vm
 
 clean:
-	rm -rf chroot_vm $(ROOTFS_DIR) launch-tee boot_efi
+	rm -rf chroot_vm $(ROOTFS_DIR) launch-tee boot_efi nitro
