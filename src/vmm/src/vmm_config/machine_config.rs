@@ -15,6 +15,9 @@ pub enum VmConfigError {
     InvalidVcpuCount,
     /// The memory size is invalid. The memory can only be an unsigned integer.
     InvalidMemorySize,
+    #[cfg(feature = "nitro")]
+    /// The enclave CID is invalid. Enclave CIDs must be greater than or equal to 4.
+    InvalidEnclaveCID,
 }
 
 impl fmt::Display for VmConfigError {
@@ -27,6 +30,8 @@ impl fmt::Display for VmConfigError {
                  be 1 or an even number when hyperthreading is enabled.",
             ),
             InvalidMemorySize => write!(f, "The memory size (MiB) is invalid.",),
+            #[cfg(feature = "nitro")]
+            InvalidEnclaveCID => write!(f, "The enclave CID is invalid.",),
         }
     }
 }
@@ -43,6 +48,9 @@ pub struct VmConfig {
     pub ht_enabled: Option<bool>,
     /// A CPU template that it is used to filter the CPU features exposed to the guest.
     pub cpu_template: Option<CpuFeaturesTemplate>,
+    /// The context identifier (CID) for the enclave.
+    #[cfg(feature = "nitro")]
+    pub enclave_cid: Option<u32>,
 }
 
 impl Default for VmConfig {
@@ -52,11 +60,14 @@ impl Default for VmConfig {
             mem_size_mib: Some(128),
             ht_enabled: Some(false),
             cpu_template: None,
+            #[cfg(feature = "nitro")]
+            enclave_cid: Some(4),
         }
     }
 }
 
 impl fmt::Display for VmConfig {
+    #[cfg(not(feature = "nitro"))]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let vcpu_count = self.vcpu_count.unwrap_or(1);
         let mem_size = self.mem_size_mib.unwrap_or(128);
@@ -66,6 +77,19 @@ impl fmt::Display for VmConfig {
             .map_or("Uninitialized".to_string(), |c| c.to_string());
 
         write!(f, "{{ \"vcpu_count\": {vcpu_count:?}, \"mem_size_mib\": {mem_size:?},  \"ht_enabled\": {ht_enabled:?},  \"cpu_template\": {cpu_template:?} }}")
+    }
+
+    #[cfg(feature = "nitro")]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let vcpu_count = self.vcpu_count.unwrap_or(1);
+        let mem_size = self.mem_size_mib.unwrap_or(128);
+        let ht_enabled = self.ht_enabled.unwrap_or(false);
+        let cpu_template = self
+            .cpu_template
+            .map_or("Uninitialized".to_string(), |c| c.to_string());
+        let enclave_cid = self.enclave_cid.unwrap_or(4);
+
+        write!(f, "{{ \"vcpu_count\": {vcpu_count:?}, \"mem_size_mib\": {mem_size:?},  \"ht_enabled\": {ht_enabled:?},  \"cpu_template\": {cpu_template:?}, \"enclave_cid\": {enclave_cid:?}  }}")
     }
 }
 

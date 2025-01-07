@@ -51,6 +51,20 @@ int32_t krun_free_ctx(uint32_t ctx_id);
 int32_t krun_set_vm_config(uint32_t ctx_id, uint8_t num_vcpus, uint32_t ram_mib);
 
 /**
+ * Sets the basic configuration parameters for the AWS Nitro Enclave.
+ *
+ * Arguments:
+ *  "ctx_id"    - the configuration context ID.
+ *  "num_vcpus" - the number of vCPUs.
+ *  "ram_mib"   - the amount of RAM in MiB.
+ *  "cid"       - the context identifier (CID) for the enclave.
+ *
+ * Returns:
+ *  Zero on success or a negative error number on failure.
+ */
+int32_t krun_set_enclave_config(uint32_t ctx_id, uint8_t num_vcpus, uint32_t ram_mib, uint32_t cid);
+
+/**
  * Sets the path to be use as root for the microVM. Not available in libkrun-SEV.
  *
  * Arguments:
@@ -93,6 +107,17 @@ int32_t krun_set_root_disk(uint32_t ctx_id, const char *disk_path);
  *  Zero on success or a negative error number on failure.
  */
 int32_t krun_set_data_disk(uint32_t ctx_id, const char *disk_path);
+
+
+/**
+ * Adds an Enclave Image File (EIF), which will contain the operating system and applications the user
+ * wants to run in the AWS Nitro Enclave.
+ *
+ * Arguments:
+ *  "ctx_id"   - the configuration context ID.
+ *  "eif_path" - a null-terminated string representing the path leading to the Enclave Image File.
+ */
+int32_t krun_add_eif_file(uint32_t ctx_id, const char *eif_path);
 
 /**
  * Adds a disk image to be used as a general partition for the microVM. The only supported image

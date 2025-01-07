@@ -115,6 +115,9 @@ pub struct VmResources {
     pub console_output: Option<PathBuf>,
     /// SMBIOS OEM Strings
     pub smbios_oem_strings: Option<Vec<String>>,
+    /// The path to the enclave image file (EIF).
+    #[cfg(feature = "nitro")]
+    pub eif_path: Option<String>,
 }
 
 impl VmResources {
@@ -144,6 +147,11 @@ impl VmResources {
             return Err(VmConfigError::InvalidMemorySize);
         }
 
+        #[cfg(feature = "nitro")]
+        if machine_config.enclave_cid.is_some() && machine_config.enclave_cid.unwrap() < 4 {
+            return Err(VmConfigError::InvalidEnclaveCID);
+        }
+
         let ht_enabled = machine_config
             .ht_enabled
             .unwrap_or_else(|| self.vm_config.ht_enabled.unwrap());
@@ -151,6 +159,11 @@ impl VmResources {
         let vcpu_count_value = machine_config
             .vcpu_count
             .unwrap_or_else(|| self.vm_config.vcpu_count.unwrap());
+
+        #[cfg(feature = "nitro")]
+        let enclave_cid = machine_config
+            .enclave_cid
+            .unwrap_or_else(|| self.vm_config.enclave_cid.unwrap());
 
         // If hyperthreading is enabled or is to be enabled in this call
         // only allow vcpu count to be 1 or even.
@@ -161,6 +174,10 @@ impl VmResources {
         // Update all the fields that have a new value.
         self.vm_config.vcpu_count = Some(vcpu_count_value);
         self.vm_config.ht_enabled = Some(ht_enabled);
+        #[cfg(feature = "nitro")]
+        {
+            self.vm_config.enclave_cid = Some(enclave_cid);
+        }
 
         if machine_config.mem_size_mib.is_some() {
             self.vm_config.mem_size_mib = machine_config.mem_size_mib;

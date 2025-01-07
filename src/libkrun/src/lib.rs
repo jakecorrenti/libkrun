@@ -366,6 +366,7 @@ pub extern "C" fn krun_free_ctx(ctx_id: u32) -> i32 {
 }
 
 #[no_mangle]
+#[cfg(not(feature = "nitro"))]
 pub extern "C" fn krun_set_vm_config(ctx_id: u32, num_vcpus: u8, ram_mib: u32) -> i32 {
     let mem_size_mib: usize = match ram_mib.try_into() {
         Ok(size) => size,
@@ -380,6 +381,42 @@ pub extern "C" fn krun_set_vm_config(ctx_id: u32, num_vcpus: u8, ram_mib: u32) -
         mem_size_mib: Some(mem_size_mib),
         ht_enabled: Some(false),
         cpu_template: None,
+    };
+
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            if ctx_cfg.get_mut().vmr.set_vm_config(&vm_config).is_err() {
+                return -libc::EINVAL;
+            }
+        }
+        Entry::Vacant(_) => return -libc::ENOENT,
+    }
+
+    KRUN_SUCCESS
+}
+
+#[no_mangle]
+#[cfg(feature = "nitro")]
+pub extern "C" fn krun_set_enclave_config(
+    ctx_id: u32,
+    num_vcpus: u8,
+    ram_mib: u32,
+    cid: u32,
+) -> i32 {
+    let mem_size_mib: usize = match ram_mib.try_into() {
+        Ok(size) => size,
+        Err(e) => {
+            warn!("Error parsing the amount of RAM: {e:?}");
+            return -libc::EINVAL;
+        }
+    };
+
+    let vm_config = VmConfig {
+        vcpu_count: Some(num_vcpus),
+        mem_size_mib: Some(mem_size_mib),
+        ht_enabled: Some(false),
+        cpu_template: None,
+        enclave_cid: Some(cid),
     };
 
     match CTX_MAP.lock().unwrap().entry(ctx_id) {
@@ -495,6 +532,26 @@ pub unsafe extern "C" fn krun_set_mapped_volumes(
     _c_mapped_volumes: *const *const c_char,
 ) -> i32 {
     -libc::EINVAL
+}
+
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+#[cfg(feature = "nitro")]
+pub unsafe extern "C" fn krun_add_eif_file(ctx_id: u32, c_eif_path: *const c_char) -> i32 {
+    let eif_path = match CStr::from_ptr(c_eif_path).to_str() {
+        Ok(path) => path,
+        Err(_) => return -libc::EINVAL,
+    };
+
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            let cfg = ctx_cfg.get_mut();
+            cfg.vmr.eif_path = Some(String::from(eif_path));
+        }
+        Entry::Vacant(_) => return -libc::ENOENT,
+    }
+
+    KRUN_SUCCESS
 }
 
 #[allow(clippy::missing_safety_doc)]
