@@ -725,6 +725,20 @@ impl Vm {
         }
     }
 
+    #[cfg(feature = "intel-tdx")]
+    pub fn tdx_secure_virt_prepare_memory(
+        &self,
+        vcpu_fd: &VcpuFd,
+        regions: &Vec<crate::vstate::MeasuredRegion>,
+    ) -> Result<()> {
+        match &self.tdx {
+            Some(t) => t
+                .configure_td_memory(vcpu_fd, &regions)
+                .map_err(Error::TdxSecVirtPrepare),
+            None => Err(Error::InvalidTee),
+        }
+    }
+
     #[cfg(feature = "amd-sev")]
     pub fn snp_secure_virt_prepare(
         &self,
@@ -882,6 +896,10 @@ pub struct Vcpu {
 
 impl Vcpu {
     thread_local!(static TLS_VCPU_PTR: VcpuCell = const { Cell::new(None) });
+
+    pub fn fd(&self) -> &VcpuFd {
+        &self.fd
+    }
 
     /// Associates `self` with the current thread.
     ///

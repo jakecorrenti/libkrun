@@ -891,6 +891,8 @@ pub fn build_microvm(
         &intc,
         &payload_config.initrd_config,
         &vm_resources.smbios_oem_strings,
+        #[cfg(feature = "intel-tdx")]
+        &measured_regions,
     )
     .map_err(StartMicrovmError::Internal)?;
 
