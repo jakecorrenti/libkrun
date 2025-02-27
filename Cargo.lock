@@ -68,8 +68,8 @@ name = "arch"
 version = "0.1.0"
 dependencies = [
  "arch_gen",
- "kvm-bindings",
- "kvm-ioctls",
+ "kvm-bindings 0.10.0",
+ "kvm-ioctls 0.19.1",
  "libc",
  "smbios",
  "tdx",
@@ -322,8 +322,8 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 name = "cpuid"
 version = "0.1.0"
 dependencies = [
- "kvm-bindings",
- "kvm-ioctls",
+ "kvm-bindings 0.10.0",
+ "kvm-ioctls 0.19.1",
  "vmm-sys-util",
 ]
 
@@ -392,8 +392,8 @@ dependencies = [
  "env_logger",
  "hvf",
  "imago",
- "kvm-bindings",
- "kvm-ioctls",
+ "kvm-bindings 0.11.1",
+ "kvm-ioctls 0.21.0",
  "libc",
  "libloading",
  "log",
@@ -770,11 +770,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "kvm-bindings"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b13baf7bdfda2e10bcb109fcb099ef40cff82374eb6b7cdcf4695bdec4e522c"
+dependencies = [
+ "vmm-sys-util",
+]
+
+[[package]]
 name = "kvm-ioctls"
 version = "0.19.1"
 dependencies = [
  "bitflags 2.6.0",
- "kvm-bindings",
+ "kvm-bindings 0.10.0",
+ "libc",
+ "vmm-sys-util",
+]
+
+[[package]]
+name = "kvm-ioctls"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "083c460d5a272c2f22205973e319147b791d92a288d7d7a8d4c6194f95229440"
+dependencies = [
+ "bitflags 2.6.0",
+ "kvm-bindings 0.11.1",
  "libc",
  "vmm-sys-util",
 ]
@@ -805,8 +826,8 @@ dependencies = [
  "devices",
  "env_logger",
  "hvf",
- "kvm-bindings",
- "kvm-ioctls",
+ "kvm-bindings 0.10.0",
+ "kvm-ioctls 0.19.1",
  "libc",
  "libloading",
  "log",
@@ -1490,8 +1511,8 @@ name = "tdx"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.6.0",
- "kvm-bindings",
- "kvm-ioctls",
+ "kvm-bindings 0.10.0",
+ "kvm-ioctls 0.19.1",
  "libc",
  "uuid",
  "vmm-sys-util",
@@ -1691,8 +1712,8 @@ dependencies = [
  "hvf",
  "kbs-types",
  "kernel",
- "kvm-bindings",
- "kvm-ioctls",
+ "kvm-bindings 0.10.0",
+ "kvm-ioctls 0.19.1",
  "libc",
  "linux-loader",
  "log",
