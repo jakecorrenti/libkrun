@@ -8,6 +8,7 @@ build = "build.rs"
 [features]
 tee = []
 amd-sev = [ "blk", "tee" ]
+intel-tdx = [ "blk", "tee" ]
 net = []
 blk = []
 efi = [ "blk", "net" ]
@@ -22,6 +23,7 @@ libc = ">=0.2.39"
 libloading = "0.8"
 log = "0.4.0"
 once_cell = "1.4.1"
+vm-memory = { version = ">=0.13", features = ["backend-mmap"] }
 
 devices = { path = "../devices" }
 polly = { path = "../polly" }
@@ -32,9 +34,9 @@ vmm = { path = "../vmm" }
 hvf = { path = "../hvf" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-kvm-bindings = { version = ">=0.11", features = ["fam-wrappers"] }
-kvm-ioctls = ">=0.21"
 vm-memory = ">=0.13"
+kvm-bindings = { git = "https://github.com/virtee/kvm-bindings.git", branch = "main", features = ["fam-wrappers"]}
+kvm-ioctls = { git = "https://github.com/virtee/kvm-ioctls.git", branch = "main"}
 
 [lib]
 name = "krun"

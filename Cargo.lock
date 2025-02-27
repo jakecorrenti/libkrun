@@ -72,6 +72,7 @@ dependencies = [
  "kvm-ioctls",
  "libc",
  "smbios",
+ "tdx",
  "utils",
  "vm-memory",
 ]
@@ -805,18 +806,16 @@ dependencies = [
 
 [[package]]
 name = "kvm-bindings"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b13baf7bdfda2e10bcb109fcb099ef40cff82374eb6b7cdcf4695bdec4e522c"
+version = "0.9.0"
+source = "git+https://github.com/virtee/kvm-bindings.git?branch=main#2cf31955d645d64881d74e0b71ae0786095bcc3e"
 dependencies = [
  "vmm-sys-util",
 ]
 
 [[package]]
 name = "kvm-ioctls"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "083c460d5a272c2f22205973e319147b791d92a288d7d7a8d4c6194f95229440"
+version = "0.16.0"
+source = "git+https://github.com/virtee/kvm-ioctls.git?branch=main#55e0d72682c9fef1cda301a938b87ce4292a746d"
 dependencies = [
  "bitflags 2.9.0",
  "kvm-bindings",
@@ -1585,6 +1584,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
+name = "tdx"
+version = "0.1.0"
+source = "git+https://github.com/jakecorrenti/tdx.git?branch=upstream-bindings#1ce2f3f7235ecc98104a92f15e78d03c8cdc69eb"
+dependencies = [
+ "bitflags 2.9.0",
+ "kvm-bindings",
+ "kvm-ioctls",
+ "libc",
+ "uuid",
+ "vmm-sys-util",
+]
+
+[[package]]
 name = "termcolor"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1771,6 +1783,7 @@ name = "vmm"
 version = "0.1.0"
 dependencies = [
  "arch",
+ "arch_gen",
  "bzip2",
  "codicon",
  "cpuid",
@@ -1794,6 +1807,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sev 6.0.0",
+ "tdx",
  "utils",
  "vm-memory",
  "vmm-sys-util",
