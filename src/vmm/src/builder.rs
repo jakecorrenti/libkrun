@@ -514,6 +514,7 @@ pub fn build_microvm(
         EventFd,
     )>,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
+    let mut guest_memfd_regions: Vec<(vm_memory::GuestAddress, u64, u64)> = vec![];
     let payload = choose_payload(vm_resources)?;
 
     let (guest_memory, arch_memory_info, mut _shm_manager, payload_config) = create_guest_memory(
@@ -546,7 +547,7 @@ pub fn build_microvm(
         let kvm = KvmContext::new()
             .map_err(Error::KvmContext)
             .map_err(StartMicrovmError::Internal)?;
-        let vm = setup_vm(&kvm, &guest_memory, vm_resources)?;
+        let vm = setup_vm(&kvm, &guest_memory, vm_resources, &mut guest_memfd_regions)?;
         (kvm, vm)
     };
 
@@ -789,6 +790,7 @@ pub fn build_microvm(
 
     let mut vmm = Vmm {
         guest_memory,
+        guest_memfd_regions,
         arch_memory_info,
         kernel_cmdline,
         vcpus_handles: Vec::new(),
@@ -1338,11 +1340,12 @@ pub(crate) fn setup_vm(
     kvm: &KvmContext,
     guest_memory: &GuestMemoryMmap,
     resources: &super::resources::VmResources,
+    guest_memfd_regions: &mut Vec<(vm_memory::GuestAddress, u64, u64)>,
 ) -> std::result::Result<Vm, StartMicrovmError> {
     let mut vm = Vm::new(kvm.fd(), resources.tee_config(), resources.vcpu_config().vcpu_count)
             .map_err(Error::Vm)
             .map_err(StartMicrovmError::Internal)?;
-    vm.memory_init(guest_memory, kvm.max_memslots())
+    vm.memory_init(guest_memory, kvm.max_memslots(), guest_memfd_regions)
         .map_err(Error::Vm)
         .map_err(StartMicrovmError::Internal)?;
     Ok(vm)
