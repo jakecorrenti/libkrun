@@ -388,6 +388,7 @@ dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
+ "libloading",
  "log",
  "lru",
  "nix 0.24.3",
@@ -638,6 +639,7 @@ dependencies = [
  "arch",
  "crossbeam-channel",
  "env_logger",
+ "libloading",
  "log",
 ]
 
