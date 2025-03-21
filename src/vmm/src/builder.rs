@@ -669,7 +669,7 @@ pub fn build_microvm(
     // while on aarch64 we need to do it the other way around.
     #[cfg(target_arch = "x86_64")]
     {
-        // let kvmioapic = KvmIoapic::new(vm.fd()).map_err(StartMicrovmError::CreateKvmIrqChip)?;
+        // let ioapic = KvmIoapic::new(vm.fd()).map_err(StartMicrovmError::CreateKvmIrqChip)?;
         let ioapic = IoApic::new(vm.fd()).map_err(StartMicrovmError::CreateKvmIrqChip)?;
         intc = Arc::new(Mutex::new(IrqChipDevice::new(Box::new(ioapic))));
 

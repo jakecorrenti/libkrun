@@ -133,6 +133,8 @@ impl MMIODeviceManager {
         vm.register_irqfd(mmio_device.locked_device().interrupt_evt(), self.irq)
             .map_err(Error::RegisterIrqFd)?;
 
+        mmio_device.locked_device().set_irq_line(self.irq);
+
         self.bus
             .insert(Arc::new(Mutex::new(mmio_device)), self.mmio_base, MMIO_LEN)
             .map_err(Error::BusError)?;

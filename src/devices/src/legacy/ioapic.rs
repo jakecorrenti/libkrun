@@ -303,6 +303,12 @@ impl BusDevice for IoApic {
         }
 
         // TODO(jakecorrenti): need to set the data to whatever is in val
+        let out_arr = val.to_ne_bytes();
+        for i in 0..4 {
+            if i < data.len() {
+                data[i] = out_arr[i];
+            }
+        }
     }
 
     // see `ioapic_mem_write` in qemu as reference implementation
