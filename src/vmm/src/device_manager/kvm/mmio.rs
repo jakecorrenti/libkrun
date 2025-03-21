@@ -88,6 +88,22 @@ impl MMIODeviceManager {
         }
     }
 
+    /// Register a MMIO IOAPIC device.
+    pub fn register_mmio_ioapic(
+        &mut self,
+        intc: Option<Arc<Mutex<devices::legacy::IrqChipDevice>>>,
+    ) -> Result<()> {
+        if let Some(intc) = intc {
+            let (addr, size) = {
+                let intc = intc.lock().unwrap();
+                (intc.get_mmio_addr(), intc.get_mmio_size())
+            };
+            self.bus.insert(intc, addr, size).map_err(Error::BusError)?;
+        }
+
+        Ok(())
+    }
+
     /// Register an already created MMIO device to be used via MMIO transport.
     pub fn register_mmio_device(
         &mut self,

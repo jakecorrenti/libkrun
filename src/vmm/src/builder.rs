@@ -23,6 +23,8 @@ use crate::device_manager::mmio::MMIODeviceManager;
 use crate::resources::VmResources;
 use crate::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
 #[cfg(target_arch = "x86_64")]
+use devices::legacy::IoApic;
+#[cfg(target_arch = "x86_64")]
 use devices::legacy::KvmIoapic;
 use devices::legacy::Serial;
 #[cfg(target_os = "macos")]
@@ -620,6 +622,14 @@ pub fn build_microvm(
     } else {
         None
     };
+    // let serial_device = Some(Box::new(io::stdout()));
+    let serial_device = Some(setup_serial_device(
+        event_manager,
+        None,
+        // None,
+        // Uncomment this to get EFI output when debugging EDK2.
+        Some(Box::new(io::stdout())),
+    )?);
 
     let exit_evt = EventFd::new(utils::eventfd::EFD_NONBLOCK)
         .map_err(Error::EventFd)
@@ -659,10 +669,16 @@ pub fn build_microvm(
     // while on aarch64 we need to do it the other way around.
     #[cfg(target_arch = "x86_64")]
     {
-        let kvmioapic = KvmIoapic::new(vm.fd()).map_err(StartMicrovmError::CreateKvmIrqChip)?;
-        intc = Arc::new(Mutex::new(IrqChipDevice::new(Box::new(kvmioapic))));
+        // let kvmioapic = KvmIoapic::new(vm.fd()).map_err(StartMicrovmError::CreateKvmIrqChip)?;
+        let ioapic = IoApic::new(vm.fd()).map_err(StartMicrovmError::CreateKvmIrqChip)?;
+        intc = Arc::new(Mutex::new(IrqChipDevice::new(Box::new(ioapic))));
 
-        attach_legacy_devices(&vm, &mut pio_device_manager)?;
+        attach_legacy_devices(
+            &vm,
+            &mut pio_device_manager,
+            &mut mmio_device_manager,
+            Some(intc.clone()),
+        )?;
 
         vcpus = create_vcpus_x86_64(
             &vm,
@@ -1326,10 +1342,17 @@ pub fn setup_serial_device(
 fn attach_legacy_devices(
     vm: &Vm,
     pio_device_manager: &mut PortIODeviceManager,
+    mmio_device_manager: &mut MMIODeviceManager,
+    intc: Option<Arc<Mutex<IrqChipDevice>>>,
 ) -> std::result::Result<(), StartMicrovmError> {
     pio_device_manager
         .register_devices()
         .map_err(Error::LegacyIOBus)
+        .map_err(StartMicrovmError::Internal)?;
+
+    mmio_device_manager
+        .register_mmio_ioapic(intc)
+        .map_err(Error::RegisterMMIODevice)
         .map_err(StartMicrovmError::Internal)?;
 
     macro_rules! register_irqfd_evt {
