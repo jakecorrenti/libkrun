@@ -20,6 +20,7 @@ use std::sync::Mutex;
 
 #[cfg(target_os = "macos")]
 use crossbeam_channel::unbounded;
+use crossbeam_channel::unbounded;
 #[cfg(feature = "blk")]
 use devices::virtio::block::ImageType;
 #[cfg(feature = "net")]
@@ -1369,12 +1370,17 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
     #[cfg(target_os = "macos")]
     let (sender, receiver) = unbounded();
 
+    let (irq_sender, irq_receiver) = unbounded();
+    let (irq_sender2, irq_receiver2) = unbounded();
+
     let _vmm = match vmm::builder::build_microvm(
         &ctx_cfg.vmr,
         &mut event_manager,
         ctx_cfg.shutdown_efd,
         #[cfg(target_os = "macos")]
         sender,
+        irq_sender,
+        irq_receiver2,
     ) {
         Ok(vmm) => vmm,
         Err(e) => {
@@ -1385,6 +1391,8 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
 
     #[cfg(target_os = "macos")]
     let mapper_vmm = _vmm.clone();
+
+    let irq_vmm = _vmm.clone();
 
     #[cfg(target_os = "macos")]
     std::thread::Builder::new()
@@ -1400,6 +1408,20 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
                         mapper_vmm.lock().unwrap().remove_mapping(s, g, l)
                     }
                 },
+            }
+        })
+        .unwrap();
+
+    std::thread::Builder::new()
+        .name("irq worker".into())
+        .spawn(move || loop {
+            match irq_receiver.recv() {
+                Err(e) => error!("Error in receiver: {:?}", e),
+                Ok((nr, flags, entries, evt_fd)) => {
+                    debug!("received {} {} {:?}", nr, flags, entries);
+                    // TODO(jakecorrenti): turn the contents into the kvm_irq_routing object
+                    evt_fd.write(1).unwrap();
+                }
             }
         })
         .unwrap();

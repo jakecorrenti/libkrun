@@ -6,6 +6,7 @@ use crate::{bus::BusDevice, virtio::AsAny};
 
 use kvm_bindings::{kvm_enable_cap, KVM_CAP_SPLIT_IRQCHIP};
 use kvm_ioctls::{Error, VmFd};
+use libc::EFD_NONBLOCK;
 use utils::eventfd::EventFd;
 
 pub const IOAPIC_BASE: u32 = 0xfec0_0000;
@@ -152,11 +153,24 @@ pub struct IoApic {
     ioregsel: u8,
     id: u8,
     version: u8,
+    irq_sender:
+        crossbeam_channel::Sender<(u32, u32, Vec<kvm_bindings::kvm_irq_routing_entry>, EventFd)>,
+    irq_receiver: crossbeam_channel::Receiver<u32>,
+    event_fd: EventFd,
     // vm_fd: kvm_ioctls::VmFd,
 }
 
 impl IoApic {
-    pub fn new(vm: &VmFd) -> Result<Self, Error> {
+    pub fn new(
+        vm: &VmFd,
+        irq_sender: crossbeam_channel::Sender<(
+            u32,
+            u32,
+            Vec<kvm_bindings::kvm_irq_routing_entry>,
+            EventFd,
+        )>,
+        irq_receiver: crossbeam_channel::Receiver<u32>,
+    ) -> Result<Self, Error> {
         let mut cap = kvm_enable_cap {
             cap: KVM_CAP_SPLIT_IRQCHIP,
             ..Default::default()
@@ -171,6 +185,9 @@ impl IoApic {
             ioregsel: 0,
             id: 0,
             version: 0,
+            irq_sender,
+            irq_receiver,
+            event_fd: EventFd::new(EFD_NONBLOCK).unwrap(),
             // vm_fd: vm,
         })
     }
@@ -210,6 +227,42 @@ impl IoApic {
         }
         // TODO(jakecorrenti): commit routes
         // vm.set_gsi_routing(&self.irq_entries.entries)
+        let mut entries = Vec::new();
+        for entry in unsafe {
+            self.irq_entries
+                .entries
+                .as_slice(self.irq_entries.nr as usize)
+                .iter()
+        } {
+            entries.push(*entry);
+        }
+        self.irq_sender
+            .send((
+                self.irq_entries.nr,
+                self.irq_entries.flags,
+                entries,
+                self.event_fd.try_clone().unwrap(),
+            ))
+            .unwrap();
+
+        loop {
+            match self.event_fd.read() {
+                Err(e) => {
+                    if e.raw_os_error().unwrap() == libc::EAGAIN {
+                        continue;
+                    } else {
+                        error!("error reading irq event fd {:#?}", e);
+                        break;
+                    }
+                }
+                Ok(_) => break,
+            }
+        }
+
+        // match self.irq_receiver.recv() {
+        //     Err(e) => error!("error in irq receiver {:?}", e),
+        //     Ok(_) => println!("ok!"),
+        // }
     }
 
     fn update_msi_route(&mut self, virq: u32, msg: &mut MSIMessage) {

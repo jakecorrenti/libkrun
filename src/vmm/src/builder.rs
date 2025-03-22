@@ -508,6 +508,13 @@ pub fn build_microvm(
     event_manager: &mut EventManager,
     _shutdown_efd: Option<EventFd>,
     #[cfg(target_os = "macos")] _map_sender: Sender<MemoryMapping>,
+    irq_sender: crossbeam_channel::Sender<(
+        u32,
+        u32,
+        Vec<kvm_bindings::kvm_irq_routing_entry>,
+        EventFd,
+    )>,
+    irq_receiver: crossbeam_channel::Receiver<u32>,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
     let payload = choose_payload(vm_resources)?;
 
@@ -670,7 +677,8 @@ pub fn build_microvm(
     #[cfg(target_arch = "x86_64")]
     {
         // let ioapic = KvmIoapic::new(vm.fd()).map_err(StartMicrovmError::CreateKvmIrqChip)?;
-        let ioapic = IoApic::new(vm.fd()).map_err(StartMicrovmError::CreateKvmIrqChip)?;
+        let ioapic = IoApic::new(vm.fd(), irq_sender, irq_receiver)
+            .map_err(StartMicrovmError::CreateKvmIrqChip)?;
         intc = Arc::new(Mutex::new(IrqChipDevice::new(Box::new(ioapic))));
 
         attach_legacy_devices(
