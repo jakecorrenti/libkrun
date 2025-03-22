@@ -1418,8 +1418,24 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
             match irq_receiver.recv() {
                 Err(e) => error!("Error in receiver: {:?}", e),
                 Ok((nr, flags, entries, evt_fd)) => {
-                    debug!("received {} {} {:?}", nr, flags, entries);
-                    // TODO(jakecorrenti): turn the contents into the kvm_irq_routing object
+                    let mut e: kvm_bindings::__IncompleteArrayField<
+                        kvm_bindings::kvm_irq_routing_entry,
+                    > = kvm_bindings::__IncompleteArrayField::new();
+                    for (i, entry) in unsafe { e.as_mut_slice(nr as usize).iter_mut().enumerate() }
+                    {
+                        *entry = entries[i];
+                    }
+                    irq_vmm
+                        .lock()
+                        .unwrap()
+                        .kvm_vm()
+                        .fd()
+                        .set_gsi_routing(&kvm_bindings::kvm_irq_routing {
+                            nr,
+                            flags,
+                            entries: e,
+                        })
+                        .unwrap();
                     evt_fd.write(1).unwrap();
                 }
             }

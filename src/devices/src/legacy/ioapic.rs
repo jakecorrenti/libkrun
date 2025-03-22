@@ -225,8 +225,7 @@ impl IoApic {
             // update msi route
             self.update_msi_route(i as u32, &mut msg);
         }
-        // TODO(jakecorrenti): commit routes
-        // vm.set_gsi_routing(&self.irq_entries.entries)
+
         let mut entries = Vec::new();
         for entry in unsafe {
             self.irq_entries
@@ -236,6 +235,7 @@ impl IoApic {
         } {
             entries.push(*entry);
         }
+
         self.irq_sender
             .send((
                 self.irq_entries.nr,
@@ -258,11 +258,6 @@ impl IoApic {
                 Ok(_) => break,
             }
         }
-
-        // match self.irq_receiver.recv() {
-        //     Err(e) => error!("error in irq receiver {:?}", e),
-        //     Ok(_) => println!("ok!"),
-        // }
     }
 
     fn update_msi_route(&mut self, virq: u32, msg: &mut MSIMessage) {
