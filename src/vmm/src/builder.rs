@@ -508,12 +508,7 @@ pub fn build_microvm(
     event_manager: &mut EventManager,
     _shutdown_efd: Option<EventFd>,
     #[cfg(target_os = "macos")] _map_sender: Sender<MemoryMapping>,
-    irq_sender: crossbeam_channel::Sender<(
-        u32,
-        u32,
-        Vec<kvm_bindings::kvm_irq_routing_entry>,
-        EventFd,
-    )>,
+    irq_sender: crossbeam_channel::Sender<(devices::legacy::IrqWorkerMessage, EventFd)>,
     irq_receiver: crossbeam_channel::Receiver<u32>,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
     let payload = choose_payload(vm_resources)?;

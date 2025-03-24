@@ -43,6 +43,8 @@ pub use self::i8042::Error as I8042DeviceError;
 pub use self::i8042::I8042Device;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use self::ioapic::IoApic;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub use self::ioapic::IrqWorkerMessage;
 pub use self::irqchip::{IrqChip, IrqChipDevice, IrqChipT};
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub use self::kvmgicv3::KvmGicV3;

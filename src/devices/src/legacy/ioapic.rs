@@ -146,6 +146,11 @@ pub struct IoApicEntryInfo {
     data: u32,
 }
 
+pub enum IrqWorkerMessage {
+    GsiRoute(u32, u32, Vec<kvm_bindings::kvm_irq_routing_entry>),
+    IrqLine(u32, bool),
+}
+
 #[derive(Debug)]
 pub struct IoApic {
     ioredtbl: [RedirectionTableEntry; 24],
@@ -153,8 +158,7 @@ pub struct IoApic {
     ioregsel: u8,
     id: u8,
     version: u8,
-    irq_sender:
-        crossbeam_channel::Sender<(u32, u32, Vec<kvm_bindings::kvm_irq_routing_entry>, EventFd)>,
+    irq_sender: crossbeam_channel::Sender<(IrqWorkerMessage, EventFd)>,
     irq_receiver: crossbeam_channel::Receiver<u32>,
     event_fd: EventFd,
     irr: u32,
@@ -164,12 +168,7 @@ pub struct IoApic {
 impl IoApic {
     pub fn new(
         vm: &VmFd,
-        irq_sender: crossbeam_channel::Sender<(
-            u32,
-            u32,
-            Vec<kvm_bindings::kvm_irq_routing_entry>,
-            EventFd,
-        )>,
+        irq_sender: crossbeam_channel::Sender<(IrqWorkerMessage, EventFd)>,
         irq_receiver: crossbeam_channel::Receiver<u32>,
     ) -> Result<Self, Error> {
         let mut cap = kvm_enable_cap {
@@ -218,6 +217,7 @@ impl IoApic {
     }
 
     fn update_kvm_routes(&mut self) {
+        debug!("ioapic: update kvm routes");
         for i in 0..24 {
             let entry = self.parse_entry(&self.ioredtbl[i]);
             let mut msg = MSIMessage {
@@ -243,9 +243,7 @@ impl IoApic {
 
         self.irq_sender
             .send((
-                self.irq_entries.nr,
-                self.irq_entries.flags,
-                entries,
+                IrqWorkerMessage::GsiRoute(self.irq_entries.nr, self.irq_entries.flags, entries),
                 self.event_fd.try_clone().unwrap(),
             ))
             .unwrap();
@@ -293,6 +291,7 @@ impl IoApic {
     }
 
     fn service_irq(&mut self) {
+        debug!("ioapic: service irq");
         let mut mask = 0;
         let mut entry: RedirectionTableEntry = Default::default();
         let mut info: IoApicEntryInfo = Default::default();
@@ -318,10 +317,64 @@ impl IoApic {
                 }
 
                 if info.trig_mode == 0 {
-                    // kvm_set_irq(i, 1)
-                    // kvm_set_irq(i, 0)
+                    self.irq_sender
+                        .send((
+                            IrqWorkerMessage::IrqLine(i as u32, true),
+                            self.event_fd.try_clone().unwrap(),
+                        ))
+                        .unwrap();
+                    loop {
+                        match self.event_fd.read() {
+                            Err(e) => {
+                                if e.raw_os_error().unwrap() == libc::EAGAIN {
+                                    continue;
+                                } else {
+                                    error!("error reading irq event fd {:#?}", e);
+                                    break;
+                                }
+                            }
+                            Ok(_) => break,
+                        }
+                    }
+                    self.irq_sender
+                        .send((
+                            IrqWorkerMessage::IrqLine(i as u32, false),
+                            self.event_fd.try_clone().unwrap(),
+                        ))
+                        .unwrap();
+                    loop {
+                        match self.event_fd.read() {
+                            Err(e) => {
+                                if e.raw_os_error().unwrap() == libc::EAGAIN {
+                                    continue;
+                                } else {
+                                    error!("error reading irq event fd {:#?}", e);
+                                    break;
+                                }
+                            }
+                            Ok(_) => break,
+                        }
+                    }
                 } else {
-                    // kvm_set_irq(i, 1)
+                    self.irq_sender
+                        .send((
+                            IrqWorkerMessage::IrqLine(i as u32, true),
+                            self.event_fd.try_clone().unwrap(),
+                        ))
+                        .unwrap();
+                    loop {
+                        match self.event_fd.read() {
+                            Err(e) => {
+                                if e.raw_os_error().unwrap() == libc::EAGAIN {
+                                    continue;
+                                } else {
+                                    error!("error reading irq event fd {:#?}", e);
+                                    break;
+                                }
+                            }
+                            Ok(_) => break,
+                        }
+                    }
                 }
             }
         }
@@ -343,21 +396,32 @@ impl IrqChipT for IoApic {
         _irq_line: Option<u32>,
         interrupt_evt: Option<&EventFd>,
     ) -> Result<(), DeviceError> {
-        debug!("setting irq for io apic");
+        debug!("setting irq for io apic: {:?}", _irq_line);
+        if let Some(interrupt_evt) = interrupt_evt {
+            if let Err(e) = interrupt_evt.write(1) {
+                error!("Failed to signal used queue: {:?}", e);
+                return Err(DeviceError::FailedSignalingUsedQueue(e));
+            }
+        } else {
+            error!("EventFd not set up for irq line");
+            return Err(DeviceError::FailedSignalingUsedQueue(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "EventFd not set up for irq line",
+            )));
+        }
+        debug!("done setting irq for io apic: IRQLINE: {:?}", _irq_line);
         Ok(())
     }
 }
 
 impl BusDevice for IoApic {
     fn read(&mut self, vcpuid: u64, offset: u64, data: &mut [u8]) {
-        debug!("read data: {:?}", data);
         let mut val = 0u32;
         let mut index = 0;
 
         match offset {
             IO_REG_SEL => {
                 val = self.ioregsel as u32;
-                debug!("reading ioregsel with val: 0x{:x}", val);
             }
             IO_WIN => {
                 if data.len() != 4 {
@@ -368,14 +432,11 @@ impl BusDevice for IoApic {
                 match self.ioregsel {
                     IO_APIC_ID | IO_APIC_ARB => {
                         val = ((self.id as u32) << 24u32) as u32;
-                        debug!("reading either id or arb with val: 0x{:x}", val);
                     }
                     IO_APIC_VER => {
                         val = (self.version as u32 | ((24u32 - 1) << 16u32)) as u32;
-                        debug!("reading apic ver with val: 0x{:x}", val);
                     }
                     _ => {
-                        debug!("reading other register");
                         index = (self.ioregsel - 0x10) >> 1;
                         if index >= 0 && index < 24 {
                             if self.ioregsel & 1 > 0 {
@@ -403,11 +464,9 @@ impl BusDevice for IoApic {
     fn write(&mut self, vcpuid: u64, offset: u64, data: &[u8]) {
         const IOAPIC_RO_BITS: u64 = (1 << 14) | (1 << 12);
         const IOAPIC_RW_BITS: u64 = !IOAPIC_RO_BITS;
-        debug!("write data: {:?}", data);
         match offset {
             IO_REG_SEL => {
                 self.ioregsel = data[0];
-                debug!("writing ioregsel with val: 0x{:x}", self.ioregsel);
             }
             IO_WIN => {
                 if data.len() != 4 {
@@ -418,13 +477,11 @@ impl BusDevice for IoApic {
                 match self.ioregsel {
                     IO_APIC_ID => {
                         self.id = data[0];
-                        debug!("writing apic id reg");
                     }
                     IO_APIC_VER | IO_APIC_ARB => {
                         debug!("ignoring write to apic ver and apic arb");
                     }
                     _ => {
-                        debug!("writing to default ioregsel");
                         let index = (self.ioregsel - 0x10) >> 1;
                         if index >= 0 && index <= 24 {
                             let ro_bits: u64 = self.ioredtbl[index as usize] & IOAPIC_RO_BITS;
@@ -449,6 +506,7 @@ impl BusDevice for IoApic {
                 }
             }
             IO_EOI => {
+                debug!("AT EOI");
                 if data.len() != 4 && self.version != 0x20 {
                     debug!("Explicit EOI is only supported for IO APIC version 0x20");
                     return;
@@ -462,6 +520,7 @@ impl BusDevice for IoApic {
 }
 
 fn fix_edge_remote_irr(entry: &mut RedirectionTableEntry) {
+    debug!("ioapic: fix edge remote irr");
     if !(*entry & (1 << 15) > 0) {
         *entry &= !(1 << 14);
     }

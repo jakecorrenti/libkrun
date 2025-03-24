@@ -115,6 +115,7 @@ impl Balloon {
                 .unwrap()
                 .set_irq(self.irq_line, Some(&self.interrupt_evt))?;
         }
+        debug!("balloon: done raising IRQ");
         Ok(())
     }
 
@@ -151,6 +152,7 @@ impl Balloon {
             }
         }
 
+        debug!("balloon: FINISHED PROCESSING FRQ");
         have_used
     }
 }

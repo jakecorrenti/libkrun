@@ -1417,27 +1417,40 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         .spawn(move || loop {
             match irq_receiver.recv() {
                 Err(e) => error!("Error in receiver: {:?}", e),
-                Ok((nr, flags, entries, evt_fd)) => {
-                    let mut e: kvm_bindings::__IncompleteArrayField<
-                        kvm_bindings::kvm_irq_routing_entry,
-                    > = kvm_bindings::__IncompleteArrayField::new();
-                    for (i, entry) in unsafe { e.as_mut_slice(nr as usize).iter_mut().enumerate() }
-                    {
-                        *entry = entries[i];
+                Ok((message, evt_fd)) => match message {
+                    devices::legacy::IrqWorkerMessage::GsiRoute(nr, flags, entries) => {
+                        let mut e: kvm_bindings::__IncompleteArrayField<
+                            kvm_bindings::kvm_irq_routing_entry,
+                        > = kvm_bindings::__IncompleteArrayField::new();
+                        for (i, entry) in
+                            unsafe { e.as_mut_slice(nr as usize).iter_mut().enumerate() }
+                        {
+                            *entry = entries[i];
+                        }
+                        irq_vmm
+                            .lock()
+                            .unwrap()
+                            .kvm_vm()
+                            .fd()
+                            .set_gsi_routing(&kvm_bindings::kvm_irq_routing {
+                                nr,
+                                flags,
+                                entries: e,
+                            })
+                            .unwrap();
+                        evt_fd.write(1).unwrap();
                     }
-                    irq_vmm
-                        .lock()
-                        .unwrap()
-                        .kvm_vm()
-                        .fd()
-                        .set_gsi_routing(&kvm_bindings::kvm_irq_routing {
-                            nr,
-                            flags,
-                            entries: e,
-                        })
-                        .unwrap();
-                    evt_fd.write(1).unwrap();
-                }
+                    devices::legacy::IrqWorkerMessage::IrqLine(irq, active) => {
+                        irq_vmm
+                            .lock()
+                            .unwrap()
+                            .kvm_vm()
+                            .fd()
+                            .set_irq_line(irq, active)
+                            .unwrap();
+                        evt_fd.write(1).unwrap();
+                    }
+                },
             }
         })
         .unwrap();

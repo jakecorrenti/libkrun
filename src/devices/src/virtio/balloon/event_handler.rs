@@ -84,6 +84,8 @@ impl Balloon {
             if let Err(e) = self.signal_used_queue() {
                 warn!("Failed to signal queue: {e:?}");
             }
+
+            debug!("balloon: successfully signaled queue");
         }
     }
 
@@ -183,6 +185,7 @@ impl Subscriber for Balloon {
         let activate_evt = self.activate_evt.as_raw_fd();
 
         if self.is_activated() {
+            debug!("balloon: handle event in activated balloon device");
             match source {
                 _ if source == ifq => self.handle_ifq_event(event),
                 _ if source == dfq => self.handle_dfq_event(event),
