@@ -157,6 +157,7 @@ pub struct IoApic {
         crossbeam_channel::Sender<(u32, u32, Vec<kvm_bindings::kvm_irq_routing_entry>, EventFd)>,
     irq_receiver: crossbeam_channel::Receiver<u32>,
     event_fd: EventFd,
+    irr: u32,
     // vm_fd: kvm_ioctls::VmFd,
 }
 
@@ -185,6 +186,7 @@ impl IoApic {
             ioregsel: 0,
             id: 0,
             version: 0,
+            irr: 0,
             irq_sender,
             irq_receiver,
             event_fd: EventFd::new(EFD_NONBLOCK).unwrap(),
@@ -222,10 +224,13 @@ impl IoApic {
                 address: entry.addr as u64,
                 data: entry.data as u64,
             };
-            // update msi route
-            self.update_msi_route(i as u32, &mut msg);
+            if !(entry.masked > 0) {
+                // update msi route
+                self.update_msi_route(i as u32, &mut msg);
+            }
         }
 
+        // equivalent to kvm_irqchip_commit_routes
         let mut entries = Vec::new();
         for entry in unsafe {
             self.irq_entries
@@ -284,6 +289,41 @@ impl IoApic {
 
             debug!("updating msi route");
             *entry = kroute;
+        }
+    }
+
+    fn service_irq(&mut self) {
+        let mut mask = 0;
+        let mut entry: RedirectionTableEntry = Default::default();
+        let mut info: IoApicEntryInfo = Default::default();
+        for i in 0..24 {
+            mask = 1 << i;
+            if self.irr & mask < 1 {
+                continue;
+            }
+
+            let mut coalesce = 0;
+            entry = self.ioredtbl[i];
+            info = self.parse_entry(&entry);
+            if !(info.masked > 0) {
+                if info.trig_mode == 0 {
+                    self.irr &= !mask;
+                } else {
+                    coalesce = self.ioredtbl[i] & (1 << 14);
+                    self.ioredtbl[i] |= 1 << 14;
+                }
+
+                if coalesce > 0 {
+                    continue;
+                }
+
+                if info.trig_mode == 0 {
+                    // kvm_set_irq(i, 1)
+                    // kvm_set_irq(i, 0)
+                } else {
+                    // kvm_set_irq(i, 1)
+                }
+            }
         }
     }
 }
@@ -403,6 +443,7 @@ impl BusDevice for IoApic {
                             // TODO(jakecorrenti): update kvm routes
                             self.update_kvm_routes();
                             // TODO(jakecorrenti): service IRQ
+                            self.service_irq();
                         }
                     }
                 }
