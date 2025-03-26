@@ -10,6 +10,14 @@ use libc::EFD_NONBLOCK;
 use utils::eventfd::EventFd;
 
 pub const IOAPIC_BASE: u32 = 0xfec0_0000;
+pub const APIC_DEFAULT_ADDRESS: u32 = 0xfee0_0000;
+
+pub const MSI_ADDR_DEST_IDX_SHIFT: u64 = 4;
+pub const MSI_ADDR_DEST_MODE_SHIFT: u64 = 2;
+
+pub const MSI_DATA_VECTOR_SHIFT: u64 = 0;
+pub const MSI_DATA_TRIGGER_SHIFT: u64 = 15;
+pub const MSI_DATA_DELIVERY_MODE_SHIFT: u64 = 8;
 
 /// register offsets
 
@@ -19,6 +27,21 @@ pub const IO_REG_SEL: u64 = 0x00;
 pub const IO_WIN: u64 = 0x10;
 
 pub const IO_EOI: u64 = 0x40;
+
+pub const IOAPIC_ID_SHIFT: u64 = 24;
+pub const IOAPIC_VER_ENTRIES_SHIFT: u64 = 16;
+pub const IOAPIC_REG_REDTBL_BASE: u64 = 0x10;
+
+pub const IOAPIC_LVT_REMOTE_IRR_SHIFT: u64 = 14;
+pub const IOAPIC_LVT_REMOTE_IRR: u64 = 1 << IOAPIC_LVT_REMOTE_IRR_SHIFT;
+pub const IOAPIC_LVT_DELIV_STATUS_SHIFT: u64 = 12;
+pub const IOAPIC_LVT_DELIV_STATUS: u64 = 1 << IOAPIC_LVT_DELIV_STATUS_SHIFT;
+pub const IOAPIC_RO_BITS: u64 = IOAPIC_LVT_REMOTE_IRR | IOAPIC_LVT_DELIV_STATUS;
+pub const IOAPIC_RW_BITS: u64 = !IOAPIC_RO_BITS;
+pub const IOAPIC_ID_MASK: u64 = 0xf;
+
+pub const IOAPIC_LVT_TRIGGER_MODE_SHIFT: u64 = 15;
+pub const IOAPIC_LVT_TRIGGER_MODE: u64 = 1 << IOAPIC_LVT_TRIGGER_MODE_SHIFT;
 
 /// I/O APIC ID
 /// the register contains the 4-bit APIC ID. The APIC bus arbitration ID for the
@@ -45,6 +68,37 @@ pub const IO_APIC_ARB: u8 = 0x02;
 /// 10:8 Delivery Mode (DELMOD) (RW)
 /// 7:0 Interrupt Vector (INTVEC) (RW)
 type RedirectionTableEntry = u64;
+
+pub const IOAPIC_LVT_MASKED_SHIFT: u64 = 16;
+pub fn interrupt_mask(entry: &RedirectionTableEntry) -> u8 {
+    ((entry >> IOAPIC_LVT_MASKED_SHIFT) & 1) as u8
+}
+
+pub fn trigger_mode(entry: &RedirectionTableEntry) -> u8 {
+    ((entry >> IOAPIC_LVT_TRIGGER_MODE_SHIFT) & 1) as u8
+}
+
+pub const IOAPIC_LVT_DEST_IDX_SHIFT: u64 = 48;
+pub fn destination_index(entry: &RedirectionTableEntry) -> u16 {
+    ((entry >> IOAPIC_LVT_DEST_IDX_SHIFT) & 0xffff) as u16
+}
+
+pub const IOAPIC_LVT_DEST_MODE_SHIFT: u64 = 11;
+pub fn destination_mode(entry: &RedirectionTableEntry) -> u8 {
+    ((entry >> IOAPIC_LVT_DEST_MODE_SHIFT) & 1) as u8
+}
+
+pub const IOAPIC_LVT_DELIV_MODE_SHIFT: u64 = 8;
+pub const IOAPIC_DM_MASK: u64 = 0x7;
+pub fn delivery_mode(entry: &RedirectionTableEntry) -> u8 {
+    ((entry >> IOAPIC_LVT_DELIV_MODE_SHIFT) & IOAPIC_DM_MASK) as u8
+}
+
+pub const IOAPIC_VECTOR_MASK: u64 = 0xff;
+pub const IOAPIC_DM_EXTINT: u64 = 0x7;
+pub fn vector(entry: &RedirectionTableEntry) -> u8 {
+    (entry >> IOAPIC_VECTOR_MASK) as u8
+}
 
 /// A 3-bit field that specifies how the APICs listed in the destination field should act upon
 /// reception of this signal. Note that certain Delivery Modes only operate as intended when used
@@ -127,8 +181,14 @@ pub enum TriggerMode {
     Level = 1,
 }
 
-#[derive(Debug, Default)]
-pub struct MSIMessage {
+pub enum IrqWorkerMessage {
+    GsiRoute(u32, u32, Vec<kvm_bindings::kvm_irq_routing_entry>),
+    IrqLine(u32, bool),
+}
+
+const IOAPIC_NUM_PINS: usize = 24;
+
+pub struct MsiMessage {
     address: u64,
     data: u64,
 }
@@ -146,22 +206,21 @@ pub struct IoApicEntryInfo {
     data: u32,
 }
 
-pub enum IrqWorkerMessage {
-    GsiRoute(u32, u32, Vec<kvm_bindings::kvm_irq_routing_entry>),
-    IrqLine(u32, bool),
-}
-
 #[derive(Debug)]
 pub struct IoApic {
-    ioredtbl: [RedirectionTableEntry; 24],
-    irq_entries: kvm_bindings::kvm_irq_routing,
-    ioregsel: u8,
     id: u8,
+    ioregsel: u8,
+    irr: u32,
+    ioredtbl: [u64; IOAPIC_NUM_PINS],
     version: u8,
+    irq_count: [u64; IOAPIC_NUM_PINS],
+    irq_level: [i32; IOAPIC_NUM_PINS],
+    irq_eoi: [i32; IOAPIC_NUM_PINS],
+
+    irq_routes: kvm_bindings::kvm_irq_routing,
+
     irq_sender: crossbeam_channel::Sender<(IrqWorkerMessage, EventFd)>,
     event_fd: EventFd,
-    irr: u32,
-    gsi_count: i32,
 }
 
 impl IoApic {
@@ -176,218 +235,21 @@ impl IoApic {
         cap.args[0] = 24;
         vm.enable_cap(&cap)?;
 
-        // FIXME: for some reason setting these default boot entries isn't working... look at qemu
-        // `kvm_init_irq` for guidance on setting this up maybe?
-        let gsi_count = vm.check_extension_int(kvm_ioctls::Cap::IrqRouting);
-        println!("GSI COUNT: {}", gsi_count);
-
-        let entries = Self::create_boot_gsi_entries();
-        let mut e: kvm_bindings::__IncompleteArrayField<kvm_bindings::kvm_irq_routing_entry> =
-            kvm_bindings::__IncompleteArrayField::new();
-        for (i, entry) in unsafe { e.as_mut_slice(entries.len()).iter_mut().enumerate() } {
-            *entry = entries[i];
-        }
-
-        for (i, entry) in unsafe { e.as_mut_slice(entries.len()).iter_mut().enumerate() } {
-            println!("idx: {} entry: {:?}", i, entry);
-        }
-
-        let irq_entries = kvm_bindings::kvm_irq_routing {
-            nr: 6,
-            flags: 0,
-            entries: e,
-        };
-
-        // let irq_entries = kvm_bindings::kvm_irq_routing::default();
-        if let Err(e) = vm.set_gsi_routing(&irq_entries) {
-            error!("unable to set gsi routing: {:?}", e);
-        }
         Ok(Self {
-            ioredtbl: [RedirectionTableEntry::default(); 24],
-            irq_entries,
-            ioregsel: 0,
             id: 0,
-            version: 0,
+            ioregsel: 0,
             irr: 0,
+            ioredtbl: [0; IOAPIC_NUM_PINS],
+            version: 0,
+            irq_count: [0; IOAPIC_NUM_PINS],
+            irq_level: [0; IOAPIC_NUM_PINS],
+            irq_eoi: [0; IOAPIC_NUM_PINS],
+
+            irq_routes: kvm_bindings::kvm_irq_routing::default(),
+
             irq_sender,
             event_fd: EventFd::new(EFD_NONBLOCK).unwrap(),
-            gsi_count,
         })
-    }
-
-    fn create_boot_gsi_entries() -> Vec<kvm_bindings::kvm_irq_routing_entry> {
-        let mut entries = Vec::new();
-        let msi_address = 4276092928u64;
-
-        entries.push(kvm_bindings::kvm_irq_routing_entry {
-            gsi: 8,
-            type_: kvm_bindings::KVM_IRQ_ROUTING_MSI,
-            u: kvm_bindings::kvm_irq_routing_entry__bindgen_ty_1 {
-                msi: kvm_bindings::kvm_irq_routing_msi {
-                    address_lo: msi_address as u32,
-                    address_hi: (msi_address >> 32) as u32,
-                    data: 33,
-                    ..Default::default()
-                },
-            },
-            ..Default::default()
-        });
-        entries.push(kvm_bindings::kvm_irq_routing_entry {
-            gsi: 5,
-            type_: kvm_bindings::KVM_IRQ_ROUTING_MSI,
-            u: kvm_bindings::kvm_irq_routing_entry__bindgen_ty_1 {
-                msi: kvm_bindings::kvm_irq_routing_msi {
-                    address_lo: msi_address as u32,
-                    address_hi: (msi_address >> 32) as u32,
-                    data: 34,
-                    ..Default::default()
-                },
-            },
-            ..Default::default()
-        });
-        entries.push(kvm_bindings::kvm_irq_routing_entry {
-            gsi: 7,
-            type_: kvm_bindings::KVM_IRQ_ROUTING_MSI,
-            u: kvm_bindings::kvm_irq_routing_entry__bindgen_ty_1 {
-                msi: kvm_bindings::kvm_irq_routing_msi {
-                    address_lo: msi_address as u32,
-                    address_hi: (msi_address >> 32) as u32,
-                    data: 35,
-                    ..Default::default()
-                },
-            },
-            ..Default::default()
-        });
-        entries.push(kvm_bindings::kvm_irq_routing_entry {
-            gsi: 6,
-            type_: kvm_bindings::KVM_IRQ_ROUTING_MSI,
-            u: kvm_bindings::kvm_irq_routing_entry__bindgen_ty_1 {
-                msi: kvm_bindings::kvm_irq_routing_msi {
-                    address_lo: msi_address as u32,
-                    address_hi: (msi_address >> 32) as u32,
-                    data: 36,
-                    ..Default::default()
-                },
-            },
-            ..Default::default()
-        });
-        entries.push(kvm_bindings::kvm_irq_routing_entry {
-            gsi: 9,
-            type_: kvm_bindings::KVM_IRQ_ROUTING_MSI,
-            u: kvm_bindings::kvm_irq_routing_entry__bindgen_ty_1 {
-                msi: kvm_bindings::kvm_irq_routing_msi {
-                    address_lo: msi_address as u32,
-                    address_hi: (msi_address >> 32) as u32,
-                    data: 37,
-                    ..Default::default()
-                },
-            },
-            ..Default::default()
-        });
-        entries.push(kvm_bindings::kvm_irq_routing_entry {
-            gsi: 4,
-            type_: kvm_bindings::KVM_IRQ_ROUTING_MSI,
-            u: kvm_bindings::kvm_irq_routing_entry__bindgen_ty_1 {
-                msi: kvm_bindings::kvm_irq_routing_msi {
-                    address_lo: msi_address as u32,
-                    address_hi: (msi_address >> 32) as u32,
-                    data: 38,
-                    ..Default::default()
-                },
-            },
-            ..Default::default()
-        });
-
-        entries
-    }
-
-    fn parse_entry(&self, &entry: &RedirectionTableEntry) -> IoApicEntryInfo {
-        let mut info = IoApicEntryInfo::default();
-        info.masked = ((entry >> 16) & 1) as u8;
-        info.trig_mode = ((entry >> 15) & 1) as u8;
-        info.dest_idx = ((entry >> 48) & 0xffff) as u16;
-        info.dest_mode = ((entry >> 11) & 1) as u8;
-        info.delivery_mode = ((entry >> 8) & 0x7) as u8;
-        if info.delivery_mode == 0x7 {
-            warn!("need to read the pic but that isn't supported");
-            // info.vector = pic_read_irq();
-        } else {
-            info.vector = (entry & 0xff) as u8;
-        }
-
-        info.addr =
-            (IOAPIC_BASE | (info.dest_idx << 4) as u32 | (info.dest_mode << 2) as u32) as u32;
-        info.data = (info.vector << 0) as u32
-            | ((info.trig_mode as u32) << 15u8) as u32
-            | ((info.delivery_mode as u32) << 8u8) as u32;
-
-        info
-    }
-
-    fn update_kvm_routes(&mut self) {
-        debug!("ioapic: update kvm routes");
-        for i in 0..24 {
-            let entry = self.parse_entry(&self.ioredtbl[i]);
-            let mut msg = MSIMessage {
-                address: entry.addr as u64,
-                data: entry.data as u64,
-            };
-            if !(entry.masked > 0) {
-                // update msi route
-                self.update_msi_route(i as u32, &mut msg);
-            }
-        }
-
-        // equivalent to kvm_irqchip_commit_routes
-        let mut entries = Vec::new();
-        for entry in unsafe {
-            self.irq_entries
-                .entries
-                .as_slice(self.irq_entries.nr as usize)
-                .iter()
-        } {
-            entries.push(*entry);
-        }
-
-        self.send_irq_worker_message(IrqWorkerMessage::GsiRoute(
-            self.irq_entries.nr,
-            self.irq_entries.flags,
-            entries,
-        ));
-    }
-
-    fn update_msi_route(&mut self, virq: u32, msg: &mut MSIMessage) {
-        let mut kroute = kvm_bindings::kvm_irq_routing_entry::default();
-        kroute.gsi = virq;
-        kroute.type_ = kvm_bindings::KVM_IRQ_ROUTING_MSI;
-        kroute.flags = 0;
-        kroute.u.msi.address_lo = msg.address as u32;
-        kroute.u.msi.address_hi = (msg.address >> 32) as u32;
-        kroute.u.msi.data = msg.data as u32;
-
-        // qemu also calls kvm_arch_~/edk2-2/Build/IntelTdx/DEBUG_GCC5/FV/OVMF.fdfixup_msi_route here. not sure if that's completely necessary
-
-        // update the routing entry
-
-        unsafe {
-            self.irq_entries
-                .entries
-                .as_mut_slice(self.irq_entries.nr as usize)[virq as usize] = kroute;
-        }
-
-        // for entry in unsafe {
-        //     self.irq_entries
-        //         .entries
-        //         .as_mut_slice(self.irq_entries.nr as usize)
-        //         .iter_mut()
-        // } {
-        //     if entry.gsi != kroute.gsi {
-        //         continue;
-        //     }
-        //
-        //     debug!("updating msi route");
-        //     *entry = kroute;
-        // }
     }
 
     fn send_irq_worker_message(&self, msg: IrqWorkerMessage) {
@@ -410,38 +272,94 @@ impl IoApic {
         }
     }
 
-    fn service_irq(&mut self) {
-        debug!("ioapic: service irq");
-        for i in 0..24 {
-            let mask = 1 << i;
-            if self.irr & mask < 1 {
-                continue;
-            }
-
-            let mut coalesce = 0;
-            let entry = self.ioredtbl[i];
-            let info = self.parse_entry(&entry);
-            if !(info.masked > 0) {
-                if info.trig_mode == 0 {
-                    self.irr &= !mask;
-                } else {
-                    coalesce = self.ioredtbl[i] & (1 << 14);
-                    self.ioredtbl[i] |= 1 << 14;
-                }
-
-                if coalesce > 0 {
-                    continue;
-                }
-
-                if info.trig_mode == 0 {
-                    self.send_irq_worker_message(IrqWorkerMessage::IrqLine(i as u32, true));
-                    self.send_irq_worker_message(IrqWorkerMessage::IrqLine(i as u32, false));
-                } else {
-                    self.send_irq_worker_message(IrqWorkerMessage::IrqLine(i as u32, true));
-                }
-            }
+    fn fix_edge_remote_irr(&mut self, index: usize) {
+        if !(self.ioredtbl[index] & IOAPIC_LVT_TRIGGER_MODE > 0) {
+            self.ioredtbl[index] &= !IOAPIC_LVT_REMOTE_IRR;
         }
     }
+
+    fn parse_entry(&self, entry: &RedirectionTableEntry) -> IoApicEntryInfo {
+        let mut info = IoApicEntryInfo::default();
+        info.masked = interrupt_mask(entry);
+        info.trig_mode = trigger_mode(entry);
+        info.dest_idx = destination_index(entry);
+        info.dest_mode = destination_mode(entry);
+        info.delivery_mode = delivery_mode(entry);
+        if (info.delivery_mode as u64) == IOAPIC_DM_EXTINT {
+            // here we would determine the vector by reading the PIC IRQ
+            error!("ioapic: libkrun does not have PIC support");
+        } else {
+            info.vector = vector(entry);
+        }
+
+        info.addr = ((APIC_DEFAULT_ADDRESS as u64)
+            | ((info.dest_idx as u64) << MSI_ADDR_DEST_IDX_SHIFT)
+            | ((info.dest_mode as u64) << MSI_ADDR_DEST_MODE_SHIFT)) as u32;
+
+        info.data = ((info.vector << MSI_DATA_VECTOR_SHIFT)
+            | (info.trig_mode << MSI_DATA_TRIGGER_SHIFT)
+            | (info.delivery_mode << MSI_DATA_DELIVERY_MODE_SHIFT)) as u32;
+
+        info
+    }
+
+    fn update_msi_route(&mut self, virq: usize, msg: &MsiMessage) {
+        let mut kroute = kvm_bindings::kvm_irq_routing_entry::default();
+        kroute.gsi = virq as u32;
+        kroute.type_ = kvm_bindings::KVM_IRQ_ROUTING_MSI;
+        kroute.flags = 0;
+        kroute.u.msi.address_lo = msg.address as u32;
+        kroute.u.msi.address_hi = (msg.address >> 32) as u32;
+
+        // update the routing entry
+
+        for entry in unsafe {
+            self.irq_routes
+                .entries
+                .as_mut_slice(self.irq_routes.nr as usize)
+                .iter_mut()
+        } {
+            if entry.gsi != kroute.gsi {
+                continue;
+            }
+            debug!("updating msi route");
+            *entry = kroute;
+        }
+    }
+
+    fn update_routes(&mut self) {
+        for i in 0..IOAPIC_NUM_PINS {
+            let info = self.parse_entry(&self.ioredtbl[i]);
+            if !(info.masked > 0) {
+                let msg = MsiMessage {
+                    address: info.addr as u64,
+                    data: info.data as u64,
+                };
+
+                // kvm_irqchip_update_msi_route
+                self.update_msi_route(i, &msg);
+            }
+        }
+
+        // kvm_irqchip_commit_routes
+        let mut entries = Vec::new();
+        for entry in unsafe {
+            self.irq_routes
+                .entries
+                .as_slice(self.irq_routes.nr as usize)
+                .iter()
+        } {
+            entries.push(*entry);
+        }
+
+        self.send_irq_worker_message(IrqWorkerMessage::GsiRoute(
+            self.irq_routes.nr,
+            self.irq_routes.flags,
+            entries,
+        ));
+    }
+
+    fn service(&mut self) {}
 }
 
 impl IrqChipT for IoApic {
@@ -450,7 +368,7 @@ impl IrqChipT for IoApic {
     }
 
     fn get_mmio_size(&self) -> u64 {
-        0x1000
+        0x20
     }
 
     fn set_irq(
@@ -478,39 +396,47 @@ impl IrqChipT for IoApic {
 
 impl BusDevice for IoApic {
     fn read(&mut self, _vcpuid: u64, offset: u64, data: &mut [u8]) {
-        let mut val = 0u32;
-
-        match offset {
+        let val = match offset {
             IO_REG_SEL => {
-                val = self.ioregsel as u32;
+                debug!("ioapic: read: ioregsel");
+                self.ioregsel as u32
             }
             IO_WIN => {
                 if data.len() != 4 {
-                    debug!("bad data read size");
+                    error!("ioapic: bad read size {}", data.len());
                     return;
                 }
 
                 match self.ioregsel {
                     IO_APIC_ID | IO_APIC_ARB => {
-                        val = ((self.id as u32) << 24u32) as u32;
+                        debug!("ioapic: read: IOAPIC ID");
+                        ((self.id as u64) << IOAPIC_ID_SHIFT) as u32
                     }
                     IO_APIC_VER => {
-                        val = (self.version as u32 | ((24u32 - 1) << 16u32)) as u32;
+                        debug!("ioapic: read: IOAPIC version");
+                        (self.version as u32
+                            | ((IOAPIC_NUM_PINS as u32 - 1) << IOAPIC_VER_ENTRIES_SHIFT))
+                            as u32
                     }
                     _ => {
-                        let index = (self.ioregsel - 0x10) >> 1;
-                        if index < 24 {
+                        let index = (self.ioregsel as u64 - IOAPIC_REG_REDTBL_BASE) >> 1;
+                        debug!("ioapic: read: index {}", index);
+                        let mut val = 0u32;
+                        if index < IOAPIC_NUM_PINS as u64 {
                             if self.ioregsel & 1 > 0 {
+                                // read upper 32 bits
                                 val = (self.ioredtbl[index as usize] >> 32) as u32;
                             } else {
-                                val = (self.ioredtbl[index as usize] & 0xffffffffu64) as u32;
+                                // read lower 32 bits
+                                val = (self.ioredtbl[index as usize] & 0xffff_ffffu64) as u32;
                             }
                         }
+                        val as u32
                     }
                 }
             }
             _ => unreachable!(),
-        }
+        };
 
         let out_arr = val.to_ne_bytes();
         for i in 0..4 {
@@ -522,67 +448,49 @@ impl BusDevice for IoApic {
 
     // see `ioapic_mem_write` in qemu as reference implementation
     fn write(&mut self, _vcpuid: u64, offset: u64, data: &[u8]) {
-        const IOAPIC_RO_BITS: u64 = (1 << 14) | (1 << 12);
-        const IOAPIC_RW_BITS: u64 = !IOAPIC_RO_BITS;
+        if data.len() != 4 {
+            error!("ioapic: bad write size {}", data.len());
+            return;
+        }
+        let arr = [data[0], data[1], data[2], data[3]];
+        let val = u32::from_ne_bytes(arr);
         match offset {
-            IO_REG_SEL => {
-                self.ioregsel = data[0];
-            }
+            IO_REG_SEL => self.ioregsel = val as u8,
             IO_WIN => {
-                if data.len() != 4 {
-                    debug!("bad data write size");
-                    return;
-                }
-
                 match self.ioregsel {
                     IO_APIC_ID => {
-                        self.id = data[0];
+                        self.id = ((val >> IOAPIC_ID_SHIFT) & (IOAPIC_ID_MASK as u32)) as u8
                     }
-                    IO_APIC_VER | IO_APIC_ARB => {
-                        debug!("ignoring write to apic ver and apic arb");
-                    }
+                    IO_APIC_VER | IO_APIC_ARB => (),
                     _ => {
-                        let index = (self.ioregsel - 0x10) >> 1;
-                        if index < 24 {
-                            let ro_bits: u64 = self.ioredtbl[index as usize] & IOAPIC_RO_BITS;
+                        let index = (self.ioregsel as u64 - IOAPIC_REG_REDTBL_BASE) >> 1;
+                        if index < IOAPIC_NUM_PINS as u64 {
+                            let ro_bits = self.ioredtbl[index as usize] & IOAPIC_RO_BITS;
                             if self.ioregsel & 1 > 0 {
-                                self.ioredtbl[index as usize] &= 0xffffffffu64;
-                                self.ioredtbl[index as usize] |= (data[0] as u64) << 32;
+                                self.ioredtbl[index as usize] &= 0xffff_ffff;
+                                self.ioredtbl[index as usize] |= (val as u64) << 32;
                             } else {
-                                self.ioredtbl[index as usize] &= !0xffffffffu64;
-                                self.ioredtbl[index as usize] |= data[0] as u64;
+                                self.ioredtbl[index as usize] &= !0xffff_ffff;
+                                self.ioredtbl[index as usize] |= val as u64;
                             }
+
                             // restore RO bits
                             self.ioredtbl[index as usize] &= IOAPIC_RW_BITS;
                             self.ioredtbl[index as usize] |= ro_bits;
+                            self.irq_eoi[index as usize] = 0;
 
-                            fix_edge_remote_irr(&mut self.ioredtbl[index as usize]);
-                            // FIXME(jakecorrenti): the routes are never getting updated, so the
-                            // list of irq routing entries is always empty
-                            panic!();
-                            self.update_kvm_routes();
-                            self.service_irq();
+                            // TODO: fix edge remote irr
+                            self.fix_edge_remote_irr(index as usize);
+                            // TODO: ioapic update kvm routes
+                            self.update_routes();
+                            // TODO: ioapic service
+                            self.service();
                         }
                     }
                 }
             }
-            IO_EOI => {
-                debug!("AT EOI");
-                if data.len() != 4 && self.version != 0x20 {
-                    debug!("Explicit EOI is only supported for IO APIC version 0x20");
-                    return;
-                }
-
-                // TODO: EOI broadcast
-            }
-            _ => unreachable!(),
+            IO_EOI => todo!(),
+            _ => (),
         }
-    }
-}
-
-fn fix_edge_remote_irr(entry: &mut RedirectionTableEntry) {
-    debug!("ioapic: fix edge remote irr");
-    if !(*entry & (1 << 15) > 0) {
-        *entry &= !(1 << 14);
     }
 }
