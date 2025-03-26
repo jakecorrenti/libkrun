@@ -159,17 +159,15 @@ pub struct IoApic {
     id: u8,
     version: u8,
     irq_sender: crossbeam_channel::Sender<(IrqWorkerMessage, EventFd)>,
-    irq_receiver: crossbeam_channel::Receiver<u32>,
     event_fd: EventFd,
     irr: u32,
-    // vm_fd: kvm_ioctls::VmFd,
+    gsi_count: i32,
 }
 
 impl IoApic {
     pub fn new(
         vm: &VmFd,
         irq_sender: crossbeam_channel::Sender<(IrqWorkerMessage, EventFd)>,
-        irq_receiver: crossbeam_channel::Receiver<u32>,
     ) -> Result<Self, Error> {
         let mut cap = kvm_enable_cap {
             cap: KVM_CAP_SPLIT_IRQCHIP,
@@ -178,19 +176,129 @@ impl IoApic {
         cap.args[0] = 24;
         vm.enable_cap(&cap)?;
 
-        vm.set_gsi_routing(&kvm_bindings::kvm_irq_routing::default())?;
+        // FIXME: for some reason setting these default boot entries isn't working... look at qemu
+        // `kvm_init_irq` for guidance on setting this up maybe?
+        let gsi_count = vm.check_extension_int(kvm_ioctls::Cap::IrqRouting);
+        println!("GSI COUNT: {}", gsi_count);
+
+        let entries = Self::create_boot_gsi_entries();
+        let mut e: kvm_bindings::__IncompleteArrayField<kvm_bindings::kvm_irq_routing_entry> =
+            kvm_bindings::__IncompleteArrayField::new();
+        for (i, entry) in unsafe { e.as_mut_slice(entries.len()).iter_mut().enumerate() } {
+            *entry = entries[i];
+        }
+
+        for (i, entry) in unsafe { e.as_mut_slice(entries.len()).iter_mut().enumerate() } {
+            println!("idx: {} entry: {:?}", i, entry);
+        }
+
+        let irq_entries = kvm_bindings::kvm_irq_routing {
+            nr: 6,
+            flags: 0,
+            entries: e,
+        };
+
+        // let irq_entries = kvm_bindings::kvm_irq_routing::default();
+        if let Err(e) = vm.set_gsi_routing(&irq_entries) {
+            error!("unable to set gsi routing: {:?}", e);
+        }
         Ok(Self {
             ioredtbl: [RedirectionTableEntry::default(); 24],
-            irq_entries: kvm_bindings::kvm_irq_routing::default(),
+            irq_entries,
             ioregsel: 0,
             id: 0,
             version: 0,
             irr: 0,
             irq_sender,
-            irq_receiver,
             event_fd: EventFd::new(EFD_NONBLOCK).unwrap(),
-            // vm_fd: vm,
+            gsi_count,
         })
+    }
+
+    fn create_boot_gsi_entries() -> Vec<kvm_bindings::kvm_irq_routing_entry> {
+        let mut entries = Vec::new();
+        let msi_address = 4276092928u64;
+
+        entries.push(kvm_bindings::kvm_irq_routing_entry {
+            gsi: 8,
+            type_: kvm_bindings::KVM_IRQ_ROUTING_MSI,
+            u: kvm_bindings::kvm_irq_routing_entry__bindgen_ty_1 {
+                msi: kvm_bindings::kvm_irq_routing_msi {
+                    address_lo: msi_address as u32,
+                    address_hi: (msi_address >> 32) as u32,
+                    data: 33,
+                    ..Default::default()
+                },
+            },
+            ..Default::default()
+        });
+        entries.push(kvm_bindings::kvm_irq_routing_entry {
+            gsi: 5,
+            type_: kvm_bindings::KVM_IRQ_ROUTING_MSI,
+            u: kvm_bindings::kvm_irq_routing_entry__bindgen_ty_1 {
+                msi: kvm_bindings::kvm_irq_routing_msi {
+                    address_lo: msi_address as u32,
+                    address_hi: (msi_address >> 32) as u32,
+                    data: 34,
+                    ..Default::default()
+                },
+            },
+            ..Default::default()
+        });
+        entries.push(kvm_bindings::kvm_irq_routing_entry {
+            gsi: 7,
+            type_: kvm_bindings::KVM_IRQ_ROUTING_MSI,
+            u: kvm_bindings::kvm_irq_routing_entry__bindgen_ty_1 {
+                msi: kvm_bindings::kvm_irq_routing_msi {
+                    address_lo: msi_address as u32,
+                    address_hi: (msi_address >> 32) as u32,
+                    data: 35,
+                    ..Default::default()
+                },
+            },
+            ..Default::default()
+        });
+        entries.push(kvm_bindings::kvm_irq_routing_entry {
+            gsi: 6,
+            type_: kvm_bindings::KVM_IRQ_ROUTING_MSI,
+            u: kvm_bindings::kvm_irq_routing_entry__bindgen_ty_1 {
+                msi: kvm_bindings::kvm_irq_routing_msi {
+                    address_lo: msi_address as u32,
+                    address_hi: (msi_address >> 32) as u32,
+                    data: 36,
+                    ..Default::default()
+                },
+            },
+            ..Default::default()
+        });
+        entries.push(kvm_bindings::kvm_irq_routing_entry {
+            gsi: 9,
+            type_: kvm_bindings::KVM_IRQ_ROUTING_MSI,
+            u: kvm_bindings::kvm_irq_routing_entry__bindgen_ty_1 {
+                msi: kvm_bindings::kvm_irq_routing_msi {
+                    address_lo: msi_address as u32,
+                    address_hi: (msi_address >> 32) as u32,
+                    data: 37,
+                    ..Default::default()
+                },
+            },
+            ..Default::default()
+        });
+        entries.push(kvm_bindings::kvm_irq_routing_entry {
+            gsi: 4,
+            type_: kvm_bindings::KVM_IRQ_ROUTING_MSI,
+            u: kvm_bindings::kvm_irq_routing_entry__bindgen_ty_1 {
+                msi: kvm_bindings::kvm_irq_routing_msi {
+                    address_lo: msi_address as u32,
+                    address_hi: (msi_address >> 32) as u32,
+                    data: 38,
+                    ..Default::default()
+                },
+            },
+            ..Default::default()
+        });
+
+        entries
     }
 
     fn parse_entry(&self, &entry: &RedirectionTableEntry) -> IoApicEntryInfo {
@@ -201,14 +309,14 @@ impl IoApic {
         info.dest_mode = ((entry >> 11) & 1) as u8;
         info.delivery_mode = ((entry >> 8) & 0x7) as u8;
         if info.delivery_mode == 0x7 {
-            debug!("need to read the pic but that isn't supported");
+            warn!("need to read the pic but that isn't supported");
             // info.vector = pic_read_irq();
         } else {
             info.vector = (entry & 0xff) as u8;
         }
 
         info.addr =
-            (0xfec00000u32 | (info.dest_idx << 4) as u32 | (info.dest_mode << 2) as u32) as u32;
+            (IOAPIC_BASE | (info.dest_idx << 4) as u32 | (info.dest_mode << 2) as u32) as u32;
         info.data = (info.vector << 0) as u32
             | ((info.trig_mode as u32) << 15u8) as u32
             | ((info.delivery_mode as u32) << 8u8) as u32;
@@ -241,11 +349,50 @@ impl IoApic {
             entries.push(*entry);
         }
 
+        self.send_irq_worker_message(IrqWorkerMessage::GsiRoute(
+            self.irq_entries.nr,
+            self.irq_entries.flags,
+            entries,
+        ));
+    }
+
+    fn update_msi_route(&mut self, virq: u32, msg: &mut MSIMessage) {
+        let mut kroute = kvm_bindings::kvm_irq_routing_entry::default();
+        kroute.gsi = virq;
+        kroute.type_ = kvm_bindings::KVM_IRQ_ROUTING_MSI;
+        kroute.flags = 0;
+        kroute.u.msi.address_lo = msg.address as u32;
+        kroute.u.msi.address_hi = (msg.address >> 32) as u32;
+        kroute.u.msi.data = msg.data as u32;
+
+        // qemu also calls kvm_arch_~/edk2-2/Build/IntelTdx/DEBUG_GCC5/FV/OVMF.fdfixup_msi_route here. not sure if that's completely necessary
+
+        // update the routing entry
+
+        unsafe {
+            self.irq_entries
+                .entries
+                .as_mut_slice(self.irq_entries.nr as usize)[virq as usize] = kroute;
+        }
+
+        // for entry in unsafe {
+        //     self.irq_entries
+        //         .entries
+        //         .as_mut_slice(self.irq_entries.nr as usize)
+        //         .iter_mut()
+        // } {
+        //     if entry.gsi != kroute.gsi {
+        //         continue;
+        //     }
+        //
+        //     debug!("updating msi route");
+        //     *entry = kroute;
+        // }
+    }
+
+    fn send_irq_worker_message(&self, msg: IrqWorkerMessage) {
         self.irq_sender
-            .send((
-                IrqWorkerMessage::GsiRoute(self.irq_entries.nr, self.irq_entries.flags, entries),
-                self.event_fd.try_clone().unwrap(),
-            ))
+            .send((msg, self.event_fd.try_clone().unwrap()))
             .unwrap();
 
         loop {
@@ -263,47 +410,17 @@ impl IoApic {
         }
     }
 
-    fn update_msi_route(&mut self, virq: u32, msg: &mut MSIMessage) {
-        let mut kroute = kvm_bindings::kvm_irq_routing_entry::default();
-        kroute.gsi = virq;
-        kroute.type_ = kvm_bindings::KVM_IRQ_ROUTING_MSI;
-        kroute.flags = 0;
-        kroute.u.msi.address_lo = msg.address as u32;
-        kroute.u.msi.address_hi = (msg.address >> 32) as u32;
-        kroute.u.msi.data = msg.data as u32;
-
-        // qemu also calls kvm_arch_fixup_msi_route here. not sure if that's completely necessary
-
-        // update the routing entry
-        for entry in unsafe {
-            self.irq_entries
-                .entries
-                .as_mut_slice(self.irq_entries.nr as usize)
-                .iter_mut()
-        } {
-            if entry.gsi != kroute.gsi {
-                continue;
-            }
-
-            debug!("updating msi route");
-            *entry = kroute;
-        }
-    }
-
     fn service_irq(&mut self) {
         debug!("ioapic: service irq");
-        let mut mask = 0;
-        let mut entry: RedirectionTableEntry = Default::default();
-        let mut info: IoApicEntryInfo = Default::default();
         for i in 0..24 {
-            mask = 1 << i;
+            let mask = 1 << i;
             if self.irr & mask < 1 {
                 continue;
             }
 
             let mut coalesce = 0;
-            entry = self.ioredtbl[i];
-            info = self.parse_entry(&entry);
+            let entry = self.ioredtbl[i];
+            let info = self.parse_entry(&entry);
             if !(info.masked > 0) {
                 if info.trig_mode == 0 {
                     self.irr &= !mask;
@@ -317,64 +434,10 @@ impl IoApic {
                 }
 
                 if info.trig_mode == 0 {
-                    self.irq_sender
-                        .send((
-                            IrqWorkerMessage::IrqLine(i as u32, true),
-                            self.event_fd.try_clone().unwrap(),
-                        ))
-                        .unwrap();
-                    loop {
-                        match self.event_fd.read() {
-                            Err(e) => {
-                                if e.raw_os_error().unwrap() == libc::EAGAIN {
-                                    continue;
-                                } else {
-                                    error!("error reading irq event fd {:#?}", e);
-                                    break;
-                                }
-                            }
-                            Ok(_) => break,
-                        }
-                    }
-                    self.irq_sender
-                        .send((
-                            IrqWorkerMessage::IrqLine(i as u32, false),
-                            self.event_fd.try_clone().unwrap(),
-                        ))
-                        .unwrap();
-                    loop {
-                        match self.event_fd.read() {
-                            Err(e) => {
-                                if e.raw_os_error().unwrap() == libc::EAGAIN {
-                                    continue;
-                                } else {
-                                    error!("error reading irq event fd {:#?}", e);
-                                    break;
-                                }
-                            }
-                            Ok(_) => break,
-                        }
-                    }
+                    self.send_irq_worker_message(IrqWorkerMessage::IrqLine(i as u32, true));
+                    self.send_irq_worker_message(IrqWorkerMessage::IrqLine(i as u32, false));
                 } else {
-                    self.irq_sender
-                        .send((
-                            IrqWorkerMessage::IrqLine(i as u32, true),
-                            self.event_fd.try_clone().unwrap(),
-                        ))
-                        .unwrap();
-                    loop {
-                        match self.event_fd.read() {
-                            Err(e) => {
-                                if e.raw_os_error().unwrap() == libc::EAGAIN {
-                                    continue;
-                                } else {
-                                    error!("error reading irq event fd {:#?}", e);
-                                    break;
-                                }
-                            }
-                            Ok(_) => break,
-                        }
-                    }
+                    self.send_irq_worker_message(IrqWorkerMessage::IrqLine(i as u32, true));
                 }
             }
         }
@@ -383,14 +446,13 @@ impl IoApic {
 
 impl IrqChipT for IoApic {
     fn get_mmio_addr(&self) -> u64 {
-        0xfec00000
+        IOAPIC_BASE as u64
     }
 
     fn get_mmio_size(&self) -> u64 {
         0x1000
     }
 
-    // TODO(jakecorrenti): figure out why this isn't getting called
     fn set_irq(
         &self,
         _irq_line: Option<u32>,
@@ -415,9 +477,8 @@ impl IrqChipT for IoApic {
 }
 
 impl BusDevice for IoApic {
-    fn read(&mut self, vcpuid: u64, offset: u64, data: &mut [u8]) {
+    fn read(&mut self, _vcpuid: u64, offset: u64, data: &mut [u8]) {
         let mut val = 0u32;
-        let mut index = 0;
 
         match offset {
             IO_REG_SEL => {
@@ -437,8 +498,8 @@ impl BusDevice for IoApic {
                         val = (self.version as u32 | ((24u32 - 1) << 16u32)) as u32;
                     }
                     _ => {
-                        index = (self.ioregsel - 0x10) >> 1;
-                        if index >= 0 && index < 24 {
+                        let index = (self.ioregsel - 0x10) >> 1;
+                        if index < 24 {
                             if self.ioregsel & 1 > 0 {
                                 val = (self.ioredtbl[index as usize] >> 32) as u32;
                             } else {
@@ -451,7 +512,6 @@ impl BusDevice for IoApic {
             _ => unreachable!(),
         }
 
-        // TODO(jakecorrenti): need to set the data to whatever is in val
         let out_arr = val.to_ne_bytes();
         for i in 0..4 {
             if i < data.len() {
@@ -461,7 +521,7 @@ impl BusDevice for IoApic {
     }
 
     // see `ioapic_mem_write` in qemu as reference implementation
-    fn write(&mut self, vcpuid: u64, offset: u64, data: &[u8]) {
+    fn write(&mut self, _vcpuid: u64, offset: u64, data: &[u8]) {
         const IOAPIC_RO_BITS: u64 = (1 << 14) | (1 << 12);
         const IOAPIC_RW_BITS: u64 = !IOAPIC_RO_BITS;
         match offset {
@@ -483,7 +543,7 @@ impl BusDevice for IoApic {
                     }
                     _ => {
                         let index = (self.ioregsel - 0x10) >> 1;
-                        if index >= 0 && index <= 24 {
+                        if index < 24 {
                             let ro_bits: u64 = self.ioredtbl[index as usize] & IOAPIC_RO_BITS;
                             if self.ioregsel & 1 > 0 {
                                 self.ioredtbl[index as usize] &= 0xffffffffu64;
@@ -495,11 +555,12 @@ impl BusDevice for IoApic {
                             // restore RO bits
                             self.ioredtbl[index as usize] &= IOAPIC_RW_BITS;
                             self.ioredtbl[index as usize] |= ro_bits;
-                            // TODO: fix_edge_remote_irr
+
                             fix_edge_remote_irr(&mut self.ioredtbl[index as usize]);
-                            // TODO(jakecorrenti): update kvm routes
+                            // FIXME(jakecorrenti): the routes are never getting updated, so the
+                            // list of irq routing entries is always empty
+                            panic!();
                             self.update_kvm_routes();
-                            // TODO(jakecorrenti): service IRQ
                             self.service_irq();
                         }
                     }

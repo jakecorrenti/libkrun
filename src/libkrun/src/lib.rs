@@ -1371,7 +1371,6 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
     let (sender, receiver) = unbounded();
 
     let (irq_sender, irq_receiver) = unbounded();
-    let (irq_sender2, irq_receiver2) = unbounded();
 
     let _vmm = match vmm::builder::build_microvm(
         &ctx_cfg.vmr,
@@ -1380,7 +1379,6 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         #[cfg(target_os = "macos")]
         sender,
         irq_sender,
-        irq_receiver2,
     ) {
         Ok(vmm) => vmm,
         Err(e) => {
@@ -1419,6 +1417,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
                 Err(e) => error!("Error in receiver: {:?}", e),
                 Ok((message, evt_fd)) => match message {
                     devices::legacy::IrqWorkerMessage::GsiRoute(nr, flags, entries) => {
+                        warn!("entries in irq worker: {} {:?}", nr, entries);
                         let mut e: kvm_bindings::__IncompleteArrayField<
                             kvm_bindings::kvm_irq_routing_entry,
                         > = kvm_bindings::__IncompleteArrayField::new();
