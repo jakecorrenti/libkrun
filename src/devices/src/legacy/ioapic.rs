@@ -19,6 +19,8 @@ pub const MSI_DATA_VECTOR_SHIFT: u64 = 0;
 pub const MSI_DATA_TRIGGER_SHIFT: u64 = 15;
 pub const MSI_DATA_DELIVERY_MODE_SHIFT: u64 = 8;
 
+pub const IOAPIC_TRIGGER_EDGE: u64 = 0;
+
 /// register offsets
 
 /// I/O Register Select (index) D/I#=0
@@ -181,6 +183,7 @@ pub enum TriggerMode {
     Level = 1,
 }
 
+#[derive(Debug)]
 pub enum IrqWorkerMessage {
     GsiRoute(u32, u32, Vec<kvm_bindings::kvm_irq_routing_entry>),
     IrqLine(u32, bool),
@@ -188,6 +191,7 @@ pub enum IrqWorkerMessage {
 
 const IOAPIC_NUM_PINS: usize = 24;
 
+#[derive(Default)]
 pub struct MsiMessage {
     address: u64,
     data: u64,
@@ -206,6 +210,8 @@ pub struct IoApicEntryInfo {
     data: u32,
 }
 
+use std::collections::HashMap;
+
 #[derive(Debug)]
 pub struct IoApic {
     id: u8,
@@ -218,6 +224,8 @@ pub struct IoApic {
     irq_eoi: [i32; IOAPIC_NUM_PINS],
 
     irq_routes: kvm_bindings::kvm_irq_routing,
+    // entries: HashMap<usize, kvm_bindings::kvm_irq_routing_entry>,
+    gsi_count: i32,
 
     irq_sender: crossbeam_channel::Sender<(IrqWorkerMessage, EventFd)>,
     event_fd: EventFd,
@@ -235,7 +243,71 @@ impl IoApic {
         cap.args[0] = 24;
         vm.enable_cap(&cap)?;
 
-        Ok(Self {
+        let gsi_count = vm.check_extension_int(kvm_ioctls::Cap::IrqRouting) - 1;
+
+        // let mut entries = HashMap::new();
+        let mut entries = Vec::with_capacity(IOAPIC_NUM_PINS);
+        for i in 0..IOAPIC_NUM_PINS {
+            Self::add_msi_route(i, &mut entries);
+        }
+
+        println!("len: {} entries: {:#?}", entries.len(), entries);
+        println!("entries msi values: ");
+        for (i, entry) in entries.iter().enumerate() {
+            unsafe {
+                println!("virq: {} msi: {:?}", i, entry.u.msi);
+            }
+        }
+        // let mut v = Vec::new();
+        // for (_virq, entry) in &entries {
+        //     v.push(entry);
+        // }
+        //
+        // println!("entries after adding to vector: {:?}", v);
+
+        let event_fd = EventFd::new(EFD_NONBLOCK).unwrap();
+        // irq_sender
+        //     .send((
+        //         IrqWorkerMessage::GsiRoute(v.len() as u32, 0, v),
+        //         event_fd.try_clone().unwrap(),
+        //     ))
+        //     .unwrap();
+
+        // println!("v len: {}", v.len());
+
+        // let mut e: kvm_bindings::__IncompleteArrayField<kvm_bindings::kvm_irq_routing_entry> =
+        //     kvm_bindings::__IncompleteArrayField::new();
+        // for (i, entry) in unsafe {
+        //     e.as_mut_slice(entries.len() as usize)
+        //         .iter_mut()
+        //         .enumerate()
+        // } {
+        //     if let Some(r) = entries.get(&i) {
+        //         println!("adding entry: virq: {} entry: {:?}", i, r);
+        //         *entry = *r;
+        //         continue;
+        //     }
+        //     println!("not adding an entry for {}", i);
+        //     // let r = entries.get(&i);
+        // }
+
+        // let mut routing = kvm_bindings::kvm_irq_routing {
+        //     nr: entries.len() as u32,
+        //     ..Default::default()
+        // };
+
+        // unsafe {
+        //     let entries_slice: &mut [kvm_bindings::kvm_irq_routing_entry] =
+        //         routing.entries.as_mut_slice(entries.len());
+        //     entries_slice.copy_from_slice(&entries);
+        // }
+
+        // vm.set_gsi_routing(&routing).unwrap();
+
+        // TODO: set initial gsi routes
+        // panic!();
+
+        let apic = Self {
             id: 0,
             ioregsel: 0,
             irr: 0,
@@ -245,31 +317,59 @@ impl IoApic {
             irq_level: [0; IOAPIC_NUM_PINS],
             irq_eoi: [0; IOAPIC_NUM_PINS],
 
+            // irq_routes: routing,
             irq_routes: kvm_bindings::kvm_irq_routing::default(),
+            // entries,
+            gsi_count: gsi_count as i32,
 
             irq_sender,
-            event_fd: EventFd::new(EFD_NONBLOCK).unwrap(),
-        })
+            event_fd,
+        };
+        Ok(apic)
+    }
+
+    fn add_msi_route(virq: usize, entries: &mut Vec<kvm_bindings::kvm_irq_routing_entry>) {
+        let msg = MsiMessage::default();
+        let mut kroute = kvm_bindings::kvm_irq_routing_entry::default();
+        kroute.gsi = virq as u32;
+        kroute.type_ = kvm_bindings::KVM_IRQ_ROUTING_MSI;
+        kroute.flags = 0;
+        kroute.u.msi.address_lo = msg.address as u32;
+        kroute.u.msi.address_hi = (msg.address >> 32) as u32;
+        kroute.u.msi.data = msg.data as u32;
+
+        if entries.len() < 4096 {
+            entries.push(kroute);
+        } else {
+            error!("ioapic: not enough space for irq");
+        }
     }
 
     fn send_irq_worker_message(&self, msg: IrqWorkerMessage) {
+        println!("SENDING IRQ WORKER MESSAGE: {:#?}", msg);
         self.irq_sender
             .send((msg, self.event_fd.try_clone().unwrap()))
             .unwrap();
 
-        loop {
-            match self.event_fd.read() {
-                Err(e) => {
-                    if e.raw_os_error().unwrap() == libc::EAGAIN {
-                        continue;
-                    } else {
-                        error!("error reading irq event fd {:#?}", e);
-                        break;
-                    }
-                }
-                Ok(_) => break,
-            }
-        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // loop {
+        //     match self.event_fd.read() {
+        //         Err(e) => {
+        //             if e.raw_os_error().unwrap() == libc::EAGAIN {
+        //                 println!("GETTING EGAIN");
+        //                 continue;
+        //             } else {
+        //                 error!("error reading irq event fd {:#?}", e);
+        //                 break;
+        //             }
+        //         }
+        //         Ok(_) => {
+        //             println!("DONE GETTING EVENT READ");
+        //             break;
+        //         },
+        //     }
+        // }
+        println!("DONE SENDING IRQ WORKER MESSAGE");
     }
 
     fn fix_edge_remote_irr(&mut self, index: usize) {
@@ -296,9 +396,10 @@ impl IoApic {
             | ((info.dest_idx as u64) << MSI_ADDR_DEST_IDX_SHIFT)
             | ((info.dest_mode as u64) << MSI_ADDR_DEST_MODE_SHIFT)) as u32;
 
-        info.data = ((info.vector << MSI_DATA_VECTOR_SHIFT)
-            | (info.trig_mode << MSI_DATA_TRIGGER_SHIFT)
-            | (info.delivery_mode << MSI_DATA_DELIVERY_MODE_SHIFT)) as u32;
+        info.data = (((info.vector as u64) << MSI_DATA_VECTOR_SHIFT)
+            | ((info.trig_mode as u64) << MSI_DATA_TRIGGER_SHIFT)
+            | ((info.delivery_mode as u64) << MSI_DATA_DELIVERY_MODE_SHIFT))
+            as u32;
 
         info
     }
@@ -328,6 +429,10 @@ impl IoApic {
     }
 
     fn update_routes(&mut self) {
+        println!(
+            "UPDATE ROUTES WITH CURRENT IRQ ROUTES STATE: {:?}",
+            self.irq_routes
+        );
         for i in 0..IOAPIC_NUM_PINS {
             let info = self.parse_entry(&self.ioredtbl[i]);
             if !(info.masked > 0) {
@@ -359,7 +464,37 @@ impl IoApic {
         ));
     }
 
-    fn service(&mut self) {}
+    fn service(&mut self) {
+        for i in 0..IOAPIC_NUM_PINS {
+            let mask = 1 << i;
+
+            if self.irr & mask > 0 {
+                let mut coalesce = 0;
+
+                let entry = self.ioredtbl[i];
+                let info = self.parse_entry(&entry);
+                if !(info.masked > 0) {
+                    if info.trig_mode as u64 == IOAPIC_TRIGGER_EDGE {
+                        self.irr &= !mask;
+                    } else {
+                        coalesce = self.ioredtbl[i] & IOAPIC_LVT_REMOTE_IRR;
+                        self.ioredtbl[i] |= IOAPIC_LVT_REMOTE_IRR;
+                    }
+
+                    if coalesce > 0 {
+                        continue;
+                    }
+
+                    if info.trig_mode as u64 == IOAPIC_TRIGGER_EDGE {
+                        self.send_irq_worker_message(IrqWorkerMessage::IrqLine(i as u32, true));
+                        self.send_irq_worker_message(IrqWorkerMessage::IrqLine(i as u32, false));
+                    } else {
+                        self.send_irq_worker_message(IrqWorkerMessage::IrqLine(i as u32, true));
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl IrqChipT for IoApic {
@@ -455,15 +590,20 @@ impl BusDevice for IoApic {
         let arr = [data[0], data[1], data[2], data[3]];
         let val = u32::from_ne_bytes(arr);
         match offset {
-            IO_REG_SEL => self.ioregsel = val as u8,
+            IO_REG_SEL => {
+                debug!("ioapic: write: ioregsel");
+                self.ioregsel = val as u8
+            }
             IO_WIN => {
                 match self.ioregsel {
                     IO_APIC_ID => {
+                        debug!("ioapic: write: IOAPIC ID");
                         self.id = ((val >> IOAPIC_ID_SHIFT) & (IOAPIC_ID_MASK as u32)) as u8
                     }
-                    IO_APIC_VER | IO_APIC_ARB => (),
+                    IO_APIC_VER | IO_APIC_ARB => debug!("ioapic: write: IOAPIC VERSION"),
                     _ => {
                         let index = (self.ioregsel as u64 - IOAPIC_REG_REDTBL_BASE) >> 1;
+                        debug!("ioapic: write: index {}", index);
                         if index < IOAPIC_NUM_PINS as u64 {
                             let ro_bits = self.ioredtbl[index as usize] & IOAPIC_RO_BITS;
                             if self.ioregsel & 1 > 0 {
@@ -479,11 +619,12 @@ impl BusDevice for IoApic {
                             self.ioredtbl[index as usize] |= ro_bits;
                             self.irq_eoi[index as usize] = 0;
 
-                            // TODO: fix edge remote irr
                             self.fix_edge_remote_irr(index as usize);
-                            // TODO: ioapic update kvm routes
+                            println!(
+                                " WHEN WRITING THIS IS THE STATE OF THE ROUTES: {:?}",
+                                self.irq_routes
+                            );
                             self.update_routes();
-                            // TODO: ioapic service
                             self.service();
                         }
                     }

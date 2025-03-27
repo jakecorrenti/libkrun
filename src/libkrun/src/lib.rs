@@ -1438,6 +1438,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
                             })
                             .unwrap();
                         evt_fd.write(1).unwrap();
+                        println!("AFTER WRITING TO EVENT FD");
                     }
                     devices::legacy::IrqWorkerMessage::IrqLine(irq, active) => {
                         irq_vmm
