@@ -405,11 +405,14 @@ impl IoApic {
             entries.push(*entry);
         }
 
-        self.send_irq_worker_message(IrqWorkerMessage::GsiRoute(
-            self.irq_routes.nr,
-            self.irq_routes.flags,
-            entries,
-        ));
+        // NOTE: it doesn't seem like Sergio does this in his initial POC. Yet QEMU does...
+        // However, not setting the GSI routes every time seems to get the interrupts to get raised
+        // more frequently... not sure what the right way to do this is
+        // self.send_irq_worker_message(IrqWorkerMessage::GsiRoute(
+        //     self.irq_routes.nr,
+        //     self.irq_routes.flags,
+        //     entries,
+        // ));
     }
 
     fn service(&mut self) {
