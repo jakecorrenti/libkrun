@@ -210,8 +210,6 @@ pub struct IoApicEntryInfo {
     data: u32,
 }
 
-use std::collections::HashMap;
-
 #[derive(Debug)]
 pub struct IoApic {
     id: u8,
@@ -224,7 +222,6 @@ pub struct IoApic {
     irq_eoi: [i32; IOAPIC_NUM_PINS],
 
     irq_routes: kvm_bindings::kvm_irq_routing,
-    // entries: HashMap<usize, kvm_bindings::kvm_irq_routing_entry>,
     gsi_count: i32,
 
     irq_sender: crossbeam_channel::Sender<(IrqWorkerMessage, EventFd)>,
@@ -234,7 +231,7 @@ pub struct IoApic {
 impl IoApic {
     pub fn new(
         vm: &VmFd,
-        irq_sender: crossbeam_channel::Sender<(IrqWorkerMessage, EventFd)>,
+        _irq_sender: crossbeam_channel::Sender<(IrqWorkerMessage, EventFd)>,
     ) -> Result<Self, Error> {
         let mut cap = kvm_enable_cap {
             cap: KVM_CAP_SPLIT_IRQCHIP,
@@ -243,70 +240,26 @@ impl IoApic {
         cap.args[0] = 24;
         vm.enable_cap(&cap)?;
 
-        let gsi_count = vm.check_extension_int(kvm_ioctls::Cap::IrqRouting) - 1;
+        let _gsi_count = vm.check_extension_int(kvm_ioctls::Cap::IrqRouting) - 1;
 
-        // let mut entries = HashMap::new();
         let mut entries = Vec::with_capacity(IOAPIC_NUM_PINS);
         for i in 0..IOAPIC_NUM_PINS {
             Self::add_msi_route(i, &mut entries);
         }
 
-        println!("len: {} entries: {:#?}", entries.len(), entries);
-        println!("entries msi values: ");
-        for (i, entry) in entries.iter().enumerate() {
-            unsafe {
-                println!("virq: {} msi: {:?}", i, entry.u.msi);
-            }
+        println!("initial entries vec: {:#?}", entries);
+
+        let mut routing = kvm_bindings::kvm_irq_routing::default();
+        routing.nr = entries.len() as u32;
+
+        unsafe {
+            routing
+                .entries
+                .as_mut_slice(routing.nr as usize)
+                .copy_from_slice(entries.as_slice());
         }
-        // let mut v = Vec::new();
-        // for (_virq, entry) in &entries {
-        //     v.push(entry);
-        // }
-        //
-        // println!("entries after adding to vector: {:?}", v);
 
         let event_fd = EventFd::new(EFD_NONBLOCK).unwrap();
-        // irq_sender
-        //     .send((
-        //         IrqWorkerMessage::GsiRoute(v.len() as u32, 0, v),
-        //         event_fd.try_clone().unwrap(),
-        //     ))
-        //     .unwrap();
-
-        // println!("v len: {}", v.len());
-
-        // let mut e: kvm_bindings::__IncompleteArrayField<kvm_bindings::kvm_irq_routing_entry> =
-        //     kvm_bindings::__IncompleteArrayField::new();
-        // for (i, entry) in unsafe {
-        //     e.as_mut_slice(entries.len() as usize)
-        //         .iter_mut()
-        //         .enumerate()
-        // } {
-        //     if let Some(r) = entries.get(&i) {
-        //         println!("adding entry: virq: {} entry: {:?}", i, r);
-        //         *entry = *r;
-        //         continue;
-        //     }
-        //     println!("not adding an entry for {}", i);
-        //     // let r = entries.get(&i);
-        // }
-
-        // let mut routing = kvm_bindings::kvm_irq_routing {
-        //     nr: entries.len() as u32,
-        //     ..Default::default()
-        // };
-
-        // unsafe {
-        //     let entries_slice: &mut [kvm_bindings::kvm_irq_routing_entry] =
-        //         routing.entries.as_mut_slice(entries.len());
-        //     entries_slice.copy_from_slice(&entries);
-        // }
-
-        // vm.set_gsi_routing(&routing).unwrap();
-
-        // TODO: set initial gsi routes
-        // panic!();
-
         let apic = Self {
             id: 0,
             ioregsel: 0,
@@ -317,12 +270,10 @@ impl IoApic {
             irq_level: [0; IOAPIC_NUM_PINS],
             irq_eoi: [0; IOAPIC_NUM_PINS],
 
-            // irq_routes: routing,
-            irq_routes: kvm_bindings::kvm_irq_routing::default(),
-            // entries,
-            gsi_count: gsi_count as i32,
+            irq_routes: routing,
+            gsi_count: _gsi_count as i32,
 
-            irq_sender,
+            irq_sender: _irq_sender,
             event_fd,
         };
         Ok(apic)
@@ -338,7 +289,8 @@ impl IoApic {
         kroute.u.msi.address_hi = (msg.address >> 32) as u32;
         kroute.u.msi.data = msg.data as u32;
 
-        if entries.len() < 4096 {
+        // 4095 is the max irq number for kvm
+        if entries.len() < 4095 {
             entries.push(kroute);
         } else {
             error!("ioapic: not enough space for irq");
@@ -429,10 +381,6 @@ impl IoApic {
     }
 
     fn update_routes(&mut self) {
-        println!(
-            "UPDATE ROUTES WITH CURRENT IRQ ROUTES STATE: {:?}",
-            self.irq_routes
-        );
         for i in 0..IOAPIC_NUM_PINS {
             let info = self.parse_entry(&self.ioredtbl[i]);
             if !(info.masked > 0) {
@@ -503,7 +451,7 @@ impl IrqChipT for IoApic {
     }
 
     fn get_mmio_size(&self) -> u64 {
-        0x20
+        0x10000
     }
 
     fn set_irq(
@@ -620,10 +568,6 @@ impl BusDevice for IoApic {
                             self.irq_eoi[index as usize] = 0;
 
                             self.fix_edge_remote_irr(index as usize);
-                            println!(
-                                " WHEN WRITING THIS IS THE STATE OF THE ROUTES: {:?}",
-                                self.irq_routes
-                            );
                             self.update_routes();
                             self.service();
                         }

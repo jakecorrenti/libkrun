@@ -1418,27 +1418,31 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
                 Ok((message, evt_fd)) => match message {
                     devices::legacy::IrqWorkerMessage::GsiRoute(nr, flags, entries) => {
                         warn!("entries in irq worker: {} {:?}", nr, entries);
-                        let mut e: kvm_bindings::__IncompleteArrayField<
-                            kvm_bindings::kvm_irq_routing_entry,
-                        > = kvm_bindings::__IncompleteArrayField::new();
-                        for (i, entry) in
-                            unsafe { e.as_mut_slice(nr as usize).iter_mut().enumerate() }
-                        {
-                            *entry = entries[i];
+                        let mut routing = kvm_bindings::kvm_irq_routing::default();
+                        routing.nr = nr;
+                        routing.flags = flags;
+
+                        unsafe {
+                            routing
+                                .entries
+                                .as_mut_slice(routing.nr as usize)
+                                .copy_from_slice(entries.as_slice());
                         }
+
+                        println!("entries in irqworker:");
+                        for entry in unsafe { routing.entries.as_slice(routing.nr as usize) } {
+                            println!("{:#?}", entry);
+                        }
+
                         irq_vmm
                             .lock()
                             .unwrap()
                             .kvm_vm()
                             .fd()
-                            .set_gsi_routing(&kvm_bindings::kvm_irq_routing {
-                                nr,
-                                flags,
-                                entries: e,
-                            })
+                            .set_gsi_routing(&routing)
                             .unwrap();
-                        evt_fd.write(1).unwrap();
-                        println!("AFTER WRITING TO EVENT FD");
+                        // NOTE: why does this not work but the one below seems to be fine
+                        // evt_fd.write(1).unwrap();
                     }
                     devices::legacy::IrqWorkerMessage::IrqLine(irq, active) => {
                         irq_vmm
