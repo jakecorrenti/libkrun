@@ -27,6 +27,12 @@ const IOAPIC_NUM_PINS: usize = 24;
 
 const IOAPIC_LVT_MASKED_SHIFT: u64 = 16;
 
+const IOAPIC_LVT_TRIGGER_MODE_SHIFT: u64 = 15;
+const IOAPIC_LVT_TRIGGER_MODE: u64 = 1 << IOAPIC_LVT_TRIGGER_MODE_SHIFT;
+
+const IOAPIC_LVT_REMOTE_IRR_SHIFT: u64 = 14;
+const IOAPIC_LVT_REMOTE_IRR: u64 = 1 << IOAPIC_LVT_REMOTE_IRR_SHIFT;
+
 #[derive(Debug, Default)]
 pub struct MsiMessage {
     address: u64,
@@ -115,6 +121,12 @@ impl IoApic {
             entries.push(kroute);
         } else {
             error!("ioapic: not enough space for irq");
+        }
+    }
+
+    fn fix_edge_remote_irr(&mut self, index: usize) {
+        if !(self.ioredtbl[index] & IOAPIC_LVT_TRIGGER_MODE > 0) {
+            self.ioredtbl[index] &= !IOAPIC_LVT_REMOTE_IRR;
         }
     }
 }
