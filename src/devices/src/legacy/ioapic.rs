@@ -9,6 +9,15 @@ use utils::sized_vec;
 
 use crate::bus::BusDevice;
 
+const APIC_DEFAULT_ADDRESS: u32 = 0xfee0_0000;
+
+const MSI_ADDR_DEST_IDX_SHIFT: u64 = 4;
+const MSI_ADDR_DEST_MODE_SHIFT: u64 = 2;
+
+const MSI_DATA_VECTOR_SHIFT: u64 = 0;
+const MSI_DATA_TRIGGER_SHIFT: u64 = 15;
+const MSI_DATA_DELIVERY_MODE_SHIFT: u64 = 8;
+
 /// I/O Register Select (index) D/I#=0
 const IO_REGSEL_OFF: u64 = 0x00;
 /// I/O Window (data) D/I#=1
@@ -32,6 +41,65 @@ const IOAPIC_LVT_TRIGGER_MODE: u64 = 1 << IOAPIC_LVT_TRIGGER_MODE_SHIFT;
 
 const IOAPIC_LVT_REMOTE_IRR_SHIFT: u64 = 14;
 const IOAPIC_LVT_REMOTE_IRR: u64 = 1 << IOAPIC_LVT_REMOTE_IRR_SHIFT;
+
+const IOAPIC_LVT_DEST_IDX_SHIFT: u64 = 48;
+
+const IOAPIC_LVT_DEST_MODE_SHIFT: u64 = 11;
+
+const IOAPIC_LVT_DELIV_MODE_SHIFT: u64 = 8;
+const IOAPIC_DM_MASK: u64 = 0x7;
+
+const IOAPIC_VECTOR_MASK: u64 = 0xff;
+const IOAPIC_DM_EXTINT: u64 = 0x7;
+
+/// 63:56 Destination Field (RW)
+/// 55:17 Reserved
+/// 16 Interrupt Mask (RW)
+/// 15 Trigger Mode (RW)
+/// 14 Remote IRR (RO)
+/// 13 Interrupt Input Pin Polarity (INTPOL) (RW)
+/// 12 Delivery Status (DELIVS) (RO)
+/// 11 Destination Mode (DESTMOD) (RW)
+/// 10:8 Delivery Mode (DELMOD) (RW)
+/// 7:0 Interrupt Vector (INTVEC) (RW)
+type RedirectionTableEntry = u64;
+
+fn interrupt_mask(entry: &RedirectionTableEntry) -> u8 {
+    ((entry >> IOAPIC_LVT_MASKED_SHIFT) & 1) as u8
+}
+
+fn trigger_mode(entry: &RedirectionTableEntry) -> u8 {
+    ((entry >> IOAPIC_LVT_TRIGGER_MODE_SHIFT) & 1) as u8
+}
+
+fn destination_index(entry: &RedirectionTableEntry) -> u16 {
+    ((entry >> IOAPIC_LVT_DEST_IDX_SHIFT) & 0xffff) as u16
+}
+
+fn destination_mode(entry: &RedirectionTableEntry) -> u8 {
+    ((entry >> IOAPIC_LVT_DEST_MODE_SHIFT) & 1) as u8
+}
+
+fn delivery_mode(entry: &RedirectionTableEntry) -> u8 {
+    ((entry >> IOAPIC_LVT_DELIV_MODE_SHIFT) & IOAPIC_DM_MASK) as u8
+}
+
+fn vector(entry: &RedirectionTableEntry) -> u8 {
+    (entry & IOAPIC_VECTOR_MASK) as u8
+}
+
+#[derive(Debug, Default)]
+pub struct IoApicEntryInfo {
+    masked: u8,
+    trig_mode: u8,
+    dest_idx: u16,
+    dest_mode: u8,
+    delivery_mode: u8,
+    vector: u8,
+
+    addr: u32,
+    data: u32,
+}
 
 #[derive(Debug, Default)]
 pub struct MsiMessage {
@@ -128,6 +196,32 @@ impl IoApic {
         if !(self.ioredtbl[index] & IOAPIC_LVT_TRIGGER_MODE > 0) {
             self.ioredtbl[index] &= !IOAPIC_LVT_REMOTE_IRR;
         }
+    }
+
+    fn parse_entry(&self, entry: &RedirectionTableEntry) -> IoApicEntryInfo {
+        let mut info = IoApicEntryInfo::default();
+        info.masked = interrupt_mask(entry);
+        info.trig_mode = trigger_mode(entry);
+        info.dest_idx = destination_index(entry);
+        info.dest_mode = destination_mode(entry);
+        info.delivery_mode = delivery_mode(entry);
+        if (info.delivery_mode as u64) == IOAPIC_DM_EXTINT {
+            // here we would determine the vector by reading the PIC IRQ
+            panic!("ioapic: libkrun does not have PIC support");
+        } else {
+            info.vector = vector(entry);
+        }
+
+        info.addr = ((APIC_DEFAULT_ADDRESS as u64)
+            | ((info.dest_idx as u64) << MSI_ADDR_DEST_IDX_SHIFT)
+            | ((info.dest_mode as u64) << MSI_ADDR_DEST_MODE_SHIFT)) as u32;
+
+        info.data = (((info.vector as u64) << MSI_DATA_VECTOR_SHIFT)
+            | ((info.trig_mode as u64) << MSI_DATA_TRIGGER_SHIFT)
+            | ((info.delivery_mode as u64) << MSI_DATA_DELIVERY_MODE_SHIFT))
+            as u32;
+
+        info
     }
 }
 
