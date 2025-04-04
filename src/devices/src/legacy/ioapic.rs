@@ -53,6 +53,13 @@ const IOAPIC_DM_MASK: u64 = 0x7;
 const IOAPIC_VECTOR_MASK: u64 = 0xff;
 const IOAPIC_DM_EXTINT: u64 = 0x7;
 
+const IOAPIC_LVT_DELIV_STATUS_SHIFT: u64 = 12;
+const IOAPIC_LVT_DELIV_STATUS: u64 = 1 << IOAPIC_LVT_DELIV_STATUS_SHIFT;
+
+const IOAPIC_RO_BITS: u64 = IOAPIC_LVT_REMOTE_IRR | IOAPIC_LVT_DELIV_STATUS;
+const IOAPIC_RW_BITS: u64 = !IOAPIC_RO_BITS;
+const IOAPIC_ID_MASK: u64 = 0xf;
+
 /// 63:56 Destination Field (RW)
 /// 55:17 Reserved
 /// 16 Interrupt Mask (RW)
@@ -373,6 +380,66 @@ impl BusDevice for IoApic {
     }
 
     fn write(&mut self, _vcpuid: u64, offset: u64, data: &[u8]) {
-        todo!()
+        // data needs to be 32-bits in size
+        if data.len() != 4 {
+            error!("ioapic: bad write size {}", data.len());
+            return;
+        }
+
+        // convert data into a u32 int with native endianness
+        let arr = [data[0], data[1], data[2], data[3]];
+        let val = u32::from_ne_bytes(arr);
+        match offset {
+            IO_REGSEL_OFF => {
+                debug!("ioapic: write: ioregsel");
+                self.ioregsel = val as u8
+            }
+            IO_WIN_OFF => {
+                match self.ioregsel {
+                    IOAPIC_ID => {
+                        debug!("ioapic: write: IOAPIC ID");
+                        self.id = ((val >> IOAPIC_ID_SHIFT) & (IOAPIC_ID_MASK as u32)) as u8
+                    }
+                    // NOTE: these are read-only registers, so they should never be written to
+                    IOAPIC_VER | IOAPIC_ARB => debug!("ioapic: write: IOAPIC VERSION"),
+                    _ => {
+                        if self.ioregsel < (IO_WIN_OFF as u8) {
+                            debug!("invalid write; ignore");
+                            return;
+                        }
+
+                        let index = (self.ioregsel as u64 - IOAPIC_REG_REDTBL_BASE) >> 1;
+                        debug!("ioapic: write: ioredtbl register {}", index);
+                        if index >= IOAPIC_NUM_PINS as u64 {
+                            warn!("ioapic: write: virq out of pin range {}", index);
+                            return;
+                        }
+
+                        let ro_bits = self.ioredtbl[index as usize] & IOAPIC_RO_BITS;
+                        // check if we are writing to the upper 32-bits of the
+                        // register or the lower 32-bits
+                        if self.ioregsel & 1 > 0 {
+                            self.ioredtbl[index as usize] &= 0xffff_ffff;
+                            self.ioredtbl[index as usize] |= (val as u64) << 32;
+                        } else {
+                            self.ioredtbl[index as usize] &= !0xffff_ffff;
+                            self.ioredtbl[index as usize] |= val as u64;
+                        }
+
+                        // restore RO bits
+                        self.ioredtbl[index as usize] &= IOAPIC_RW_BITS;
+                        self.ioredtbl[index as usize] |= ro_bits;
+                        self.irq_eoi[index as usize] = 0;
+
+                        // if the trigger mode is EDGE, clear IRR bit
+                        self.fix_edge_remote_irr(index as usize);
+                        self.update_routes();
+                        self.service();
+                    }
+                }
+            }
+            IO_EOI_OFF => todo!(),
+            _ => (),
+        }
     }
 }
