@@ -108,7 +108,9 @@ pub struct MsiMessage {
 }
 
 #[derive(Debug)]
-pub enum IrqWorkerMessage {}
+pub enum IrqWorkerMessage {
+    GsiRoute(u32, u32, Vec<kvm_irq_routing_entry>),
+}
 
 #[derive(Debug)]
 pub struct IoApic {
@@ -239,6 +241,42 @@ impl IoApic {
                 *entry = kroute;
             }
         }
+    }
+
+    fn send_irq_worker_message(&self, msg: IrqWorkerMessage) {
+        self.irq_sender
+            .send((msg, self.event_fd.try_clone().unwrap()))
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    fn update_routes(&mut self) {
+        for i in 0..IOAPIC_NUM_PINS {
+            let info = self.parse_entry(&self.ioredtbl[i]);
+            // When the bit is 1, the interrupt signal is masked.
+            // Edge sensitive interrupts signaled on a masked interrupt pin are ignored.
+            // Level-asserts or negates occuring on a masked level-sensitive pin are also
+            // ignored and have no side effects. When the bit is 0, the interrupt is not masekd.
+            // An edge or level on an interrupt pin that is not masked results in the delivery of
+            // the interrupt to the destination.
+
+            if !(info.masked > 0) {
+                let msg = MsiMessage {
+                    address: info.addr as u64,
+                    data: info.data as u64,
+                };
+
+                // kvm_irqchip_update_msi_route
+                self.update_msi_route(i, &msg);
+            }
+        }
+
+        self.send_irq_worker_message(IrqWorkerMessage::GsiRoute(
+            self.irq_routes.len() as u32,
+            0,
+            self.irq_routes.clone(),
+        ));
     }
 }
 
