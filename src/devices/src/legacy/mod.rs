@@ -16,6 +16,8 @@ mod irqchip;
 mod kvmgicv3;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod kvmioapic;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod ioapic;
 #[cfg(target_arch = "aarch64")]
 mod rtc_pl031;
 #[cfg(target_os = "macos")]
@@ -44,6 +46,8 @@ pub use self::irqchip::{IrqChip, IrqChipDevice, IrqChipT};
 pub use self::kvmgicv3::KvmGicV3;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use self::kvmioapic::KvmIoapic;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub use self::ioapic::IoApic;
 #[cfg(target_arch = "aarch64")]
 pub use self::rtc_pl031::RTC;
 pub use self::serial::Serial;
