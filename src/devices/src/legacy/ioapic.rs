@@ -223,6 +223,23 @@ impl IoApic {
 
         info
     }
+
+    fn update_msi_route(&mut self, virq: usize, msg: &MsiMessage) {
+        let mut kroute = kvm_irq_routing_entry::default();
+        kroute.gsi = virq as u32;
+        kroute.type_ = KVM_IRQ_ROUTING_MSI;
+        kroute.flags = 0;
+        kroute.u.msi.address_lo = msg.address as u32;
+        kroute.u.msi.address_hi = (msg.address >> 32) as u32;
+        kroute.u.msi.data = msg.data as u32;
+
+        // update the routing entry
+        for entry in self.irq_routes.iter_mut() {
+            if entry.gsi == kroute.gsi {
+                *entry = kroute;
+            }
+        }
+    }
 }
 
 impl BusDevice for IoApic {
