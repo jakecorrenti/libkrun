@@ -1324,6 +1324,21 @@ pub extern "C" fn krun_setgid(ctx_id: u32, gid: libc::gid_t) -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn krun_split_irqchip(ctx_id: u32, enable: bool) -> i32 {
+    if enable && cfg!(target_os = "macos") {
+        return -libc::EINVAL;
+    }
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            let cfg = ctx_cfg.get_mut();
+            cfg.vmr.split_irqchip = enable;
+            KRUN_SUCCESS
+        }
+        Entry::Vacant(_) => return -libc::ENOENT,
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
     #[cfg(target_os = "linux")]
     {
