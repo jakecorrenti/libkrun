@@ -20,6 +20,9 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::LazyLock;
 use std::sync::Mutex;
 
+#[cfg(target_arch = "x86_64")]
+use kvm_bindings::{kvm_irq_routing, kvm_irq_routing_entry};
+
 #[cfg(target_os = "macos")]
 use crossbeam_channel::unbounded;
 #[cfg(feature = "blk")]
@@ -1468,12 +1471,17 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
     #[cfg(target_os = "macos")]
     let (sender, receiver) = unbounded();
 
+    #[cfg(target_arch = "x86_64")]
+    let (irq_sender, irq_receiver) = crossbeam_channel::unbounded();
+
     let _vmm = match vmm::builder::build_microvm(
         &ctx_cfg.vmr,
         &mut event_manager,
         ctx_cfg.shutdown_efd,
         #[cfg(target_os = "macos")]
         sender,
+        #[cfg(target_arch = "x86_64")]
+        irq_sender,
     ) {
         Ok(vmm) => vmm,
         Err(e) => {
@@ -1503,6 +1511,58 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
                 }
             })
             .unwrap();
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        let irq_vmm = _vmm.clone();
+
+        if ctx_cfg.vmr.split_irqchip {
+            std::thread::Builder::new()
+                .name("irq worker".into())
+                .spawn(move || loop {
+                    match irq_receiver.recv() {
+                        Err(e) => error!("Error in receiver: {:?}", e),
+                        Ok((message, evt_fd)) => match message {
+                            devices::legacy::IrqWorkerMessage::GsiRoute(nr, flags, entries) => {
+                                let mut irq_routing =
+                                    utils::sized_vec::vec_with_array_field::<
+                                        kvm_irq_routing,
+                                        kvm_irq_routing_entry,
+                                    >(entries.len());
+                                unsafe {
+                                    let entries_slice: &mut [kvm_irq_routing_entry] =
+                                        irq_routing[0].entries.as_mut_slice(entries.len());
+                                    entries_slice.copy_from_slice(&entries.as_slice());
+                                }
+                                irq_vmm
+                                    .lock()
+                                    .unwrap()
+                                    .kvm_vm()
+                                    .fd()
+                                    .set_gsi_routing(&irq_routing[0])
+                                    .unwrap();
+                                // set_gsi_routing(
+                                //     irq_vmm.lock().unwrap().kvm_vm().fd(),
+                                //     entries.as_slice(),
+                                // )
+                                // .unwrap();
+                            }
+                            devices::legacy::IrqWorkerMessage::IrqLine(irq, active) => {
+                                irq_vmm
+                                    .lock()
+                                    .unwrap()
+                                    .kvm_vm()
+                                    .fd()
+                                    .set_irq_line(irq, active)
+                                    .unwrap();
+                                evt_fd.write(1).unwrap();
+                            }
+                        },
+                    }
+                })
+                .unwrap();
+        }
     }
 
     loop {

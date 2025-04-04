@@ -11,13 +11,13 @@ mod gicv3;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod hvfgicv3;
 mod i8042;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod ioapic;
 mod irqchip;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 mod kvmgicv3;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod kvmioapic;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-mod ioapic;
 #[cfg(target_arch = "aarch64")]
 mod rtc_pl031;
 #[cfg(target_os = "macos")]
@@ -41,13 +41,13 @@ pub use self::gpio::Gpio;
 pub use self::hvfgicv3::HvfGicV3;
 pub use self::i8042::Error as I8042DeviceError;
 pub use self::i8042::I8042Device;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub use self::ioapic::{IoApic, IrqWorkerMessage};
 pub use self::irqchip::{IrqChip, IrqChipDevice, IrqChipT};
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub use self::kvmgicv3::KvmGicV3;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use self::kvmioapic::KvmIoapic;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub use self::ioapic::IoApic;
 #[cfg(target_arch = "aarch64")]
 pub use self::rtc_pl031::RTC;
 pub use self::serial::Serial;
