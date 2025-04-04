@@ -7,6 +7,22 @@ use kvm_ioctls::{Error, VmFd};
 use utils::eventfd::{EventFd, EFD_SEMAPHORE};
 use utils::sized_vec;
 
+use crate::bus::BusDevice;
+
+/// I/O Register Select (index) D/I#=0
+const IO_REGSEL_OFF: u64 = 0x00;
+/// I/O Window (data) D/I#=1
+const IO_WIN_OFF: u64 = 0x10;
+const IO_EOI_OFF: u64 = 0x40;
+
+const IOAPIC_ID: u8 = 0x00;
+const IOAPIC_VER: u8 = 0x01;
+const IOAPIC_ARB: u8 = 0x02;
+
+const IOAPIC_ID_SHIFT: u64 = 24;
+const IOAPIC_VER_ENTRIES_SHIFT: u64 = 16;
+const IOAPIC_REG_REDTBL_BASE: u64 = 0x10;
+
 const IOAPIC_NUM_PINS: usize = 24;
 
 const IOAPIC_LVT_MASKED_SHIFT: u64 = 16;
@@ -100,5 +116,68 @@ impl IoApic {
         } else {
             error!("ioapic: not enough space for irq");
         }
+    }
+}
+
+impl BusDevice for IoApic {
+    fn read(&mut self, _vcpuid: u64, offset: u64, data: &mut [u8]) {
+        let val = match offset {
+            IO_REGSEL_OFF => {
+                debug!("ioapic: read: ioregsel");
+                self.ioregsel as u32
+            }
+            IO_WIN_OFF => {
+                // the data needs to be 32-bits in size
+                if data.len() != 4 {
+                    error!("ioapic: bad read size {}", data.len());
+                    return;
+                }
+
+                match self.ioregsel {
+                    IOAPIC_ID | IOAPIC_ARB => {
+                        debug!("ioapic: read: IOAPIC ID");
+                        ((self.id as u64) << IOAPIC_ID_SHIFT) as u32
+                    }
+                    IOAPIC_VER => {
+                        debug!("ioapic: read: IOAPIC version");
+                        (self.version as u32
+                            | ((IOAPIC_NUM_PINS as u32 - 1) << IOAPIC_VER_ENTRIES_SHIFT))
+                            as u32
+                    }
+                    _ => {
+                        let index = (self.ioregsel as u64 - IOAPIC_REG_REDTBL_BASE) >> 1;
+                        debug!("ioapic: read: ioredtbl register {}", index);
+                        let mut val = 0u32;
+
+                        // we can only read from this register in 32-bit chunks.
+                        // Therefore, we need to check if we are reading the
+                        // upper 32 bits or the lower
+                        if index < IOAPIC_NUM_PINS as u64 {
+                            if self.ioregsel & 1 > 0 {
+                                // read upper 32 bits
+                                val = (self.ioredtbl[index as usize] >> 32) as u32;
+                            } else {
+                                // read lower 32 bits
+                                val = (self.ioredtbl[index as usize] & 0xffff_ffffu64) as u32;
+                            }
+                        }
+                        val as u32
+                    }
+                }
+            }
+            _ => unreachable!(),
+        };
+
+        // turn the value into native endian byte order and put that value into `data`
+        let out_arr = val.to_ne_bytes();
+        for i in 0..4 {
+            if i < data.len() {
+                data[i] = out_arr[i];
+            }
+        }
+    }
+
+    fn write(&mut self, _vcpuid: u64, offset: u64, data: &[u8]) {
+        todo!()
     }
 }
