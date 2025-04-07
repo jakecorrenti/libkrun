@@ -2,20 +2,31 @@
 extern crate log;
 
 use std::collections::hash_map::Entry;
+#[cfg(feature = "nitro")]
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::env;
 use std::ffi::CStr;
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
+#[cfg(feature = "nitro")]
+use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::slice;
 use std::sync::atomic::{AtomicI32, Ordering};
+#[cfg(feature = "nitro")]
+use std::sync::Arc;
 use std::sync::Mutex;
 
+#[cfg(feature = "nitro")]
+use aws_nitro_enclaves_image_format::{
+    defs::EifIdentityInfo,
+    utils::{eif_reader::EifReader, get_pcrs, PcrSignatureChecker},
+};
 #[cfg(target_os = "macos")]
 use crossbeam_channel::unbounded;
 #[cfg(feature = "blk")]
@@ -32,6 +43,10 @@ use libc::size_t;
 use libc::{c_char, c_int};
 use once_cell::sync::Lazy;
 use polly::event_manager::EventManager;
+#[cfg(feature = "nitro")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "nitro")]
+use sha2::{Digest, Sha384};
 use utils::eventfd::EventFd;
 use vmm::resources::VmResources;
 #[cfg(feature = "blk")]
@@ -58,6 +73,32 @@ const MAX_ARGS: usize = 4096;
 
 // Path to the init binary to be executed inside the VM.
 const INIT_PATH: &str = "/init.krun";
+
+/// Kibibytes
+#[cfg(feature = "nitro")]
+const KiB: u64 = 1024;
+
+/// Mebibytes
+#[cfg(feature = "nitro")]
+const MiB: u64 = 1024 * KiB;
+
+/// Gibibytes
+#[cfg(feature = "nitro")]
+const GiB: u64 = 1024 * MiB;
+
+/// Mapping between hugepage size and allocation flag, in descending order of size
+#[cfg(feature = "nitro")]
+const HUGE_PAGE_MAP: [(libc::c_int, u64); 9] = [
+    (libc::MAP_HUGE_16GB, 16 * GiB),
+    (libc::MAP_HUGE_2GB, 2 * GiB),
+    (libc::MAP_HUGE_1GB, 1 * GiB),
+    (libc::MAP_HUGE_512MB, 512 * MiB),
+    (libc::MAP_HUGE_256MB, 256 * MiB),
+    (libc::MAP_HUGE_32MB, 32 * MiB),
+    (libc::MAP_HUGE_16MB, 16 * MiB),
+    (libc::MAP_HUGE_8MB, 8 * MiB),
+    (libc::MAP_HUGE_2MB, 2 * MiB),
+];
 
 #[derive(Default)]
 struct TsiConfig {
@@ -1142,6 +1183,527 @@ fn create_virtio_net(ctx_cfg: &mut ContextConfig, backend: VirtioNetBackend) {
         .expect("Failed to create network interface");
 }
 
+// NOTE(jakecorrenti): I think that we can probably get rid of this and just assume `EnclaveCpuConfig::Count` based on the existing libkrun API
+/// The CPU configuration requested by the user
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum EnclaveCpuConfig {
+    /// A list with the desired CPU IDs
+    List(Vec<u32>),
+    /// The numer of desired CPU IDs
+    Count(u32),
+}
+
+impl Default for EnclaveCpuConfig {
+    fn default() -> Self {
+        Self::Count(0)
+    }
+}
+
+/// A memory region used by the enclave memory allocator
+#[cfg(feature = "nitro")]
+#[derive(Clone, Debug)]
+struct MemoryRegion {
+    /// Flags to determine the usage for the memory region
+    flags: u64,
+    /// The region's size in bytes
+    mem_size: u64,
+    /// The region's virtual address
+    mem_addr: u64,
+}
+
+/// Flag indicating a memory region for enclave general usage.
+#[cfg(feature = "nitro")]
+const NE_DEFAULT_MEMORY_REGION: u64 = 0;
+
+/// The CID for the vsock device of the parent VM
+#[cfg(feature = "nitro")]
+pub const VMADDR_CID_PARENT: u32 = 3;
+
+/// The vsock port used to confirm that the enclave has booted
+#[cfg(feature = "nitro")]
+pub const ENCLAVE_READY_VSOCK_PORT: u32 = 9000;
+
+/// Enclave Image Format (EIF) Flag
+#[cfg(feature = "nitro")]
+const NE_EIF_IMAGE: u64 = 0x01;
+
+/// IOCTL code for `NE_GET_IMAGE_LOAD_INFO`
+#[cfg(feature = "nitro")]
+const NE_GET_IMAGE_LOAD_INFO: u64 =
+    nix::request_code_readwrite!(NE_MAGIC, 0x22, size_of::<ImageLoadInfo>()) as _;
+
+/// IOCTL code for `NE_SET_USER_MEMORY_REGION`
+#[cfg(feature = "nitro")]
+const NE_SET_USER_MEMORY_REGION: u64 =
+    nix::request_code_readwrite!(NE_MAGIC, 0x23, size_of::<MemoryRegion>()) as _;
+
+#[cfg(feature = "nitro")]
+impl MemoryRegion {
+    /// Create a new `MemoryRegion` instance with the specific size (in bytes)
+    fn new(hugepage_flag: libc::c_int) -> Result<Self, ()> {
+        let region_index = HUGE_PAGE_MAP
+            .iter()
+            .position(|&page_info| page_info.0 == hugepage_flag)
+            .unwrap();
+        let region_size = HUGE_PAGE_MAP[region_index].1;
+
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                region_size as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_HUGETLB | hugepage_flag,
+                -1,
+                0,
+            )
+        };
+
+        if addr == libc::MAP_FAILED {
+            return Err(());
+        }
+
+        Ok(Self {
+            flags: NE_DEFAULT_MEMORY_REGION,
+            mem_size: region_size,
+            mem_addr: addr as u64,
+        })
+    }
+}
+
+// NOTE(jakecorrenti): I think that we can get rid of this or at least modify it to use the vm-memory crate instead
+/// Helper structure to allocate memory resources needed by an enclave
+#[cfg(feature = "nitro")]
+#[derive(Clone, Default, Debug)]
+struct ResourceAllocator {
+    /// The requested memory size in bytes
+    requested_mem: u64,
+    /// The memory regions that have actually been allocated
+    mem_regions: Vec<MemoryRegion>,
+}
+
+#[cfg(feature = "nitro")]
+impl ResourceAllocator {
+    /// Create a new `ResourceAllocator` instance which must cover at least the requested amount of memory (in bytes)
+    fn new(requested_mem: u64) -> Result<Self, ()> {
+        if requested_mem == 0 {
+            /// insufficient memory requested
+            return Err(());
+        }
+
+        Ok(Self {
+            requested_mem,
+            mem_regions: Vec::new(),
+        })
+    }
+
+    /// Allocate and provide a list of memory regions. This function creates a list of memory regions which contain at least
+    /// `self.requested_mem` bytes. Each region is equivalent to a huge-page and is allocated using memory mapping.
+    fn allocate(&mut self) -> Result<&Vec<MemoryRegion>, ()> {
+        let mut allocated_pages = BTreeMap::<u64, u32>::new();
+        let mut needed_mem = self.requested_mem as u64;
+        let mut split_index = 0;
+
+        println!(
+            "allocating memory regions to hold {} bytes",
+            self.requested_mem
+        );
+
+        // always allocate larger pages first, to reduce fragmentation and page count.
+        // Once an allocation of a given page size fails, proceed ot the next smaller
+        // page size and retry
+
+        for page_info in HUGE_PAGE_MAP.iter() {
+            while needed_mem >= page_info.1 as i64 {
+                match MemoryRegion::new(page_info.0) {
+                    Ok(value) => {
+                        needed_mem -= value.mem_size as i64;
+                        self.mem_regoins.push(value);
+                    }
+                    Err(e) => break,
+                }
+            }
+        }
+
+        // If the user requested exactly the amount of memory that was reserved earlier,
+        // we should be left with no more memory that needs allocation. But if the user
+        // requests a smaller amount, we must then aim to reduce wasted memory from larger-page allocations (ex: if we have 1x1 GB page and 1x2 MB page, but we want to allocate only 512 MB, the above algorithms will have allocated only the 2MB page, since the 1 GB page was too large for waht was needed; we now need to allocate in increasing order of page_size in order to reduce wastage).
+        if needed_mem > 0 {
+            for page_info in HUGE_PAGE_MAP.iter().rev() {
+                while needed_mem > 0 {
+                    match MemoryRegion::new(page_info.0) {
+                        Ok(value) => {
+                            needed_mem -= value.mem_size as i64;
+                            self.mem_regions.push(value);
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+
+        // If we still have more memory to allocate, it means we have insufficient resources
+        if needed_mem > 0 {
+            // Insufficient memory available
+            return Err(());
+        }
+
+        // At this point, we may have allocated more than we need, so we release all regions we no longer need, starting with the smallest one
+        self.mem_regions
+            .sort_by(|reg1, reg2| reg2.mem_size.cmp(&reg1.mem_size));
+
+        needed_mem = self.requested_mem as i64;
+        for region in self.mem_regions.iter() {
+            if needed_mem <= 0 {
+                break;
+            }
+
+            needed_mem -= region.mem_size as i64;
+            split_index += 1;
+        }
+
+        // The regions that we no longer need are freed automatically on draining, since MemRegion implements `Drop`
+        self.mem_regions.drain(split_index..);
+
+        // Generate a summary of the allocated memory
+        for region in self.mem_regions.iter() {
+            if let Some(page_count) = allocated_pages.get_mut(&region.mem_size) {
+                *page_count += 1;
+            } else {
+                allocated_pages.insert(region.mem_size, 1);
+            }
+        }
+
+        Ok(&self.mem_regions)
+    }
+}
+
+/// The information to be provided for a `build-enclave` request
+#[cfg(feature = "nitro")]
+#[derive(Serialize, Clone, Deserialize, Debug, Default)]
+struct EnclaveBuildInfo {
+    #[serde(rename = "Measurements")]
+    /// The measurement results (hashes) of various enclave properties
+    measurements: BTreeMap<String, String>,
+}
+
+#[cfg(feature = "nitro")]
+impl EnclaveBuildInfo {
+    /// Create a new `EnclaveBuildInfo` instance from the given measurements
+    fn new(measurements: BTreeMap<String, String>) -> Self {
+        Self { measurements }
+    }
+}
+
+// #[cfg(feature = "nitro")]
+// #[derive(Debug, Clone, Serialize, Deserialize)]
+// struct EifIdentityInfo {
+//     #[serde(rename = "ImageName")]
+//     img_name: String,
+//     #[serde(rename = "ImageVersion")]
+//     img_version: String,
+//     #[serde(rename = "BuildMetadata")]
+//     build_info: EnclaveBuildInfo,
+//     #[serde(rename = "DockerInfo")]
+//     docker_info: serde_json::Value,
+//     #[serde(rename = "CustomMetadata")]
+//     custom_info: serde_json::Value,
+// }
+
+/// Helper structure for managing an enclave's resources
+#[cfg(feature = "nitro")]
+#[derive(Default, Debug)]
+struct EnclaveHandle {
+    /// The CPU configuratoin as requested by the user
+    cpu_config: EnclaveCpuConfig,
+    /// List of CPU IDs provided to the enclave
+    cpu_ids: Vec<u32>,
+    /// Amount of memory allocated for the enclave in MiB
+    allocated_memory_mib: u64,
+    /// The enclave slot ID
+    slot_uid: u64,
+    /// The enclave CID
+    enclave_cid: Option<u64>,
+    /// Enclave flags (including the enclave debug mode flag)
+    flags: u64,
+    /// The driver-provided enclave descriptor
+    enc_fd: RawFd,
+    /// The allocator used to manage enclave memory
+    resource_allocator: ResourceAllocator,
+    /// The enclave image file
+    eif_file: Option<File>,
+    /// The current state the enclave is in
+    state: EnclaveState,
+    /// PCR values
+    build_info: EnclaveBuildInfo,
+    /// EIF metadata
+    metadata: Option<EifIdentityInfo>,
+}
+
+/// Constant number used for computing the lower memory limit
+const ENCLAVE_MEMORY_EIF_SIZE_RATIO: u64 = 4;
+/// Path corresponding to the Nitro Enclaves device file
+const NE_DEV_FILEPATH: &str = "/dev/nitro_enclaves";
+/// The bit indicating if an enclave has been launched in debug mode
+const NE_ENCLAVE_DEBUG_MODE: u64 = 0x1;
+/// Magic number for Nitro Enclave IOCTL codes
+const NE_MAGIC: u64 = 0xAE;
+/// IOCTL code for `NE_CREATE_VM`
+const NE_CREATE_VM: u64 = nix::request_code_read!(NE_MAGIC, 0x20, size_of::<u64>()) as _;
+
+/// the state an enclave might be in
+#[derive(Clone, Default, Debug)]
+enum EnclaveState {
+    #[default]
+    /// The enclave is not running (it's either not started or has been terminated)
+    Empty,
+    /// The enclave is running
+    Running,
+    /// The enclave is in the process of terminating
+    Terminating,
+}
+
+#[cfg(feature = "nitro")]
+impl EnclaveHandle {
+    fn new(
+        enclave_cid: Option<u64>,
+        memory_mib: u64,
+        cpu_config: EnclaveCpuConfig,
+        eif_file: File,
+        debug_mode: bool,
+    ) -> Result<Self, ()> {
+        let requested_mem = memory_mib << 20;
+        let eif_size = eif_file.metadata().unwrap().len();
+
+        if ENCLAVE_MEMORY_EIF_SIZE_RATIO * eif_size > requested_mem {
+            // insufficient memory requested
+            return Err(());
+        }
+
+        let dev_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(NE_DEV_FILEPATH)
+            .unwrap();
+
+        let mut slot_uid: u64 = 0;
+        let enc_fd = EnclaveHandle::do_ioctl(dev_file.as_raw_fd(), NE_CREATE_VM, &mut slot_uid);
+        let flags: u64 = if debug_mode { NE_ENCLAVE_DEBUG_MODE } else { 0 };
+
+        if enc_fd < 0 {
+            /// Invalid enclave fd
+            return Err(());
+        }
+
+        Ok(EnclaveHandle {
+            cpu_config,
+            cpu_ids: vec![],
+            allocated_memory_mib: 0,
+            slot_uid,
+            enclave_cid,
+            flags,
+            enc_fd,
+            resource_allocator: ResourceAllocator::new(requested_mem).unwrap(),
+            eif_file: Some(eif_file),
+            state: EnclaveState::default(),
+            build_info: EnclaveBuildInfo::new(BTreeMap::new()),
+            metadata: None,
+        })
+    }
+
+    fn do_ioctl<T>(fd: RawFd, ioctl_code: u64, arg: &mut T) -> i32 {
+        let rc = unsafe { libc::ioctl(fd, ioctl_code as _, arg) };
+        if rc >= 0 {
+            return rc;
+        }
+
+        std::io::Error::last_os_error()
+            .raw_os_error()
+            .expect("Error Reason")
+    }
+
+    fn create_enclave(&mut self, enclave_name: String) -> Result<String, ()> {
+        self.init_memory().unwrap();
+        self.init_cpus().unwrap();
+
+        let sockaddr = VsockAddr::new(VMADDR_CID_PARENT, ENCLAVE_READY_VSOCK_PORT);
+        let listener = VsockListener::bind(&sockaddr).unwrap();
+
+        let enclave_start = self.start().unwrap();
+
+        // Get eif size to feed it to calculate_necessary_timeout helper function
+        let eif_size = self.eif_file.as_ref().unwrap().metadata().unwrap().len();
+
+        // Update the poll timeout based on the eif size or allocated memory
+        let poll_timeout = calculate_necessary_timeout(eif_size, self.allocated_memory_mib * MiB);
+
+        enclave_ready(listener, poll_timeout).map_err(|e| {
+            let err_msg = format!("waiting on enclave to boot failed with error {:?}", e);
+            self.terminate_enclave_error(&err_msg);
+            ()
+        })?;
+
+        self.enclave_cid = Some(enclave_start.enclave_cid);
+
+        let info = get_run_enclaves_info(
+            enclave_name,
+            enclave_start.enclave_cid,
+            self.slot_uid,
+            self.cpu_ids.clone(),
+            self.allocated_memory_mib,
+        )
+        .unwrap();
+
+        Ok(info.enclave_id)
+    }
+
+    fn init_memory(&mut self) -> Result<(), ()> {
+        let requested_mem_mib = self.resource_allocator.requested_mem >> 20;
+        let regions = self.resource_allocator.allocate().unwrap();
+
+        self.allocated_memory_mib = regions.iter().fold(0, |mut acc, val| {
+            acc += val.mem_size;
+            acc
+        }) >> 20;
+
+        if self.allocated_memory_mib < requested_mem_mib {
+            // insufficient memory available
+            return Err(());
+        }
+
+        let eif_file = self.eif_file.as_mut().unwrap();
+
+        let mut image_load_info = ImageLoadInfo {
+            flags: NE_EIF_IMAGE,
+            memory_offset: 0,
+        };
+        EnclaveHandle::do_ioctl(self.enc_fd, NE_GET_IMAGE_LOAD_INFO, &mut image_load_info).unwrap();
+
+        println!("memory load information: {:#?}", image_load_info);
+        write_eif_to_regions(eif_file, regions, image_load_info.memory_offset as usize).unwrap();
+
+        // provide the regions to the driver for ownership change
+        for region in regions {
+            let mut user_mem_region: UserMemoryRegion = region.into();
+            EnclaveHandle::do_ioctl(self.enc_fd, NE_SET_USER_MEMORY_REGION, &mut user_mem_region)
+                .unwrap();
+        }
+
+        println!("finished initializing memory");
+        Ok(())
+    }
+}
+
+/// The structure which manages an enclave in a thread-safe manner
+#[cfg(feature = "nitro")]
+#[derive(Clone, Default, Debug)]
+struct EnclaveManager {
+    /// The full ID of the managed enclave
+    enclave_id: String,
+    /// Name of the managed enclave
+    enclave_name: String,
+    /// A thread-safe handle to the enclave's resources
+    enclave_handle: Arc<Mutex<EnclaveHandle>>,
+}
+
+#[cfg(feature = "nitro")]
+impl EnclaveManager {
+    fn new(
+        enclave_cid: Option<u64>,
+        memory_mib: u64,
+        cpu_config: EnclaveCpuConfig,
+        eif_file: File,
+        debug_mode: bool,
+        enclave_name: String,
+    ) -> Result<Self, ()> {
+        let handle =
+            EnclaveHandle::new(enclave_cid, memory_mib, cpu_config, eif_file, debug_mode).unwrap();
+
+        Ok(Self {
+            enclave_id: String::new(),
+            enclave_name,
+            enclave_handle: Arc::new(Mutex::new(handle)),
+        })
+    }
+
+    fn run_enclave(&mut self) -> Result<(), ()> {
+        self.enclave_id = self
+            .enclave_handle
+            .lock()
+            .unwrap()
+            .create_enclave(self.enclave_name.clone())
+            .unwrap();
+        Ok(())
+    }
+}
+
+#[cfg(feature = "nitro")]
+fn run_enclave(ctx_cfg: &mut ContextConfig) -> i32 {
+    // NOTE(jakecorrenti): currently, the CLI will detach the process from its parent and communicate using STREAM sockets.
+    // The enclave will repeatedly loop through a event loop based on connections to its socket, which could be the CLI, an enclave event, or itself
+    //
+    // Do we need to detach the process? Can we do this on its own thread since we don't care about running multiple enclaves at once?
+    // Well if we are going to stay in line with the other examples, then I would assume that when we do `krun_start_enter` that it will just enter the console of the enclave, so then we really can't do multiple guests within the same project... I think?
+    // Then if we don't need to daemonize the enclave process, do we need to deal with communicating over the sockets?
+
+    let mut enclave_manager = EnclaveManager::default();
+
+    // Check to make sure the EIF path was provided and open it if so
+    if ctx_cfg.vmr.eif_path.is_none() {
+        return -libc::EINVAL;
+    }
+
+    let eif_file = File::open(ctx_cfg.vmr.eif_path.as_ref().unwrap()).unwrap();
+    let enclave_cid = ctx_cfg.vmr.vm_config().enclave_cid.unwrap() as u64;
+    let memory_mib = ctx_cfg.vmr.vm_config().mem_size_mib.unwrap() as u64;
+    let cpu_count = ctx_cfg.vmr.vm_config().vcpu_count.unwrap();
+    let cpu_config = EnclaveCpuConfig::Count(cpu_count as u32);
+    let enclave_name = "libkrun_nitro_enclave";
+
+    enclave_manager = EnclaveManager::new(
+        Some(enclave_cid),
+        memory_mib,
+        cpu_config,
+        eif_file,
+        false, // debug_mode,
+        enclave_name.to_string(),
+    )
+    .unwrap();
+
+    let mut signature_checker =
+        PcrSignatureChecker::from_eif(ctx_cfg.vmr.eif_path.as_ref().unwrap()).unwrap();
+    if !signature_checker.is_empty() {
+        signature_checker.verify().unwrap();
+    }
+
+    let path = ctx_cfg.vmr.eif_path.as_ref().unwrap().clone();
+    struct measurement_result {
+        measurements: BTreeMap<String, String>,
+        metadata: Option<EifIdentityInfo>,
+    };
+    let handle = std::thread::spawn(move || {
+        let mut eif_reader = EifReader::from_eif(path).unwrap();
+        let measurements = get_pcrs(
+            &mut eif_reader.image_hasher,
+            &mut eif_reader.bootstrap_hasher,
+            &mut eif_reader.app_hasher,
+            &mut eif_reader.cert_hasher,
+            Sha384::new(),
+            eif_reader.signature_section.is_some(),
+        )
+        .unwrap();
+
+        Ok::<measurement_result, ()>(measurement_result {
+            measurements,
+            metadata: eif_reader.get_metadata(),
+        })
+    });
+
+    enclave_manager.run_enclave().unwrap();
+    enclave_manager.update_start();
+
+    KRUN_SUCCESS
+}
+
 #[no_mangle]
 pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
     #[cfg(target_os = "linux")]
@@ -1165,6 +1727,9 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         Some(ctx_cfg) => ctx_cfg,
         None => return -libc::ENOENT,
     };
+
+    #[cfg(feature = "nitro")]
+    return run_enclave(&mut ctx_cfg);
 
     #[cfg(feature = "blk")]
     for block_cfg in ctx_cfg.get_block_cfg() {
@@ -1203,6 +1768,8 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         )),
         kernel_cmdline_epilog: Some(format!(" -- {}", ctx_cfg.get_args())),
     };
+
+    println!("boot_source: {:?}", boot_source);
 
     if ctx_cfg.vmr.set_boot_source(boot_source).is_err() {
         return -libc::EINVAL;

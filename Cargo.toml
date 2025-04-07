@@ -1,8 +1,6 @@
 [workspace]
 members = ["src/libkrun"]
 resolver = "2"
-
-[profile.dev]
 #panic = "abort"
 
 [profile.release]
