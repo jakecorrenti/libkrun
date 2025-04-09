@@ -549,7 +549,7 @@ pub fn build_microvm(
         let kvm = KvmContext::new()
             .map_err(Error::KvmContext)
             .map_err(StartMicrovmError::Internal)?;
-        let vm = setup_vm(&kvm, &guest_memory, vm_resources, &mut guest_memfd_regions)?;
+        let vm = setup_vm(&kvm, &guest_memory, vm_resources, &mut guest_memfd_regions, #[cfg(feature = "intel-tdx")] vmcall_sender)?;
         (kvm, vm)
     };
 
@@ -725,7 +725,7 @@ pub fn build_microvm(
             &pio_device_manager.io_bus,
             &exit_evt,
             #[cfg(feature = "intel-tdx")]
-            vmcall_sender,
+            vm.vmcall_sender.clone(),
         )
         .map_err(StartMicrovmError::Internal)?;
     }
@@ -1345,8 +1345,10 @@ pub(crate) fn setup_vm(
     guest_memory: &GuestMemoryMmap,
     resources: &super::resources::VmResources,
     guest_memfd_regions: &mut Vec<(vm_memory::GuestAddress, u64, u64)>,
+    #[cfg(feature = "intel-tdx")]
+    vmcall_sender: Sender<(u64, u64, bool)>,
 ) -> std::result::Result<Vm, StartMicrovmError> {
-    let mut vm = Vm::new(kvm.fd(), resources.tee_config(), resources.vcpu_config().vcpu_count)
+    let mut vm = Vm::new(kvm.fd(), resources.tee_config(), resources.vcpu_config().vcpu_count, #[cfg(feature = "intel-tdx")] vmcall_sender)
             .map_err(Error::Vm)
             .map_err(StartMicrovmError::Internal)?;
     vm.memory_init(guest_memory, kvm.max_memslots(), guest_memfd_regions)

@@ -497,6 +497,9 @@ pub struct Vm {
 
     #[cfg(feature = "tee")]
     pub tee_config: Tee,
+
+    #[cfg(feature = "intel-tdx")]
+    pub vmcall_sender: crossbeam_channel::Sender<(u64, u64, bool)>,
 }
 
 impl Vm {
@@ -552,7 +555,7 @@ impl Vm {
     }
 
     #[cfg(feature = "intel-tdx")]
-    pub fn new(kvm: &Kvm, tee_config: &TeeConfig, vcpu_count: u8) -> Result<Self> {
+    pub fn new(kvm: &Kvm, tee_config: &TeeConfig, vcpu_count: u8, vmcall_sender: crossbeam_channel::Sender<(u64, u64, bool)>) -> Result<Self> {
         // create fd for interacting with kvm-vm specific functions
         let vm_fd = kvm
             .create_vm_with_type(tdx::launch::KVM_X86_TDX_VM)
@@ -573,6 +576,7 @@ impl Vm {
             supported_msrs,
             tdx: Some(tdx),
             tee_config: tee_config.tee,
+            vmcall_sender,
         })
     }
 
