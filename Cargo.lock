@@ -765,7 +765,7 @@ dependencies = [
 [[package]]
 name = "kvm-bindings"
 version = "0.9.0"
-source = "git+https://github.com/jakecorrenti/kvm-bindings.git?branch=tdx#97032dd33d1509045a4195f3068df3255808d390"
+source = "git+https://github.com/virtee/kvm-bindings.git?branch=main#2cf31955d645d64881d74e0b71ae0786095bcc3e"
 dependencies = [
  "vmm-sys-util",
 ]
@@ -773,7 +773,7 @@ dependencies = [
 [[package]]
 name = "kvm-ioctls"
 version = "0.16.0"
-source = "git+https://github.com/jakecorrenti/kvm-ioctls.git?branch=tdx#b2cbebff5d59f73d8f6fde899fb69b100235823c"
+source = "git+https://github.com/virtee/kvm-ioctls.git?branch=main#bbff0820bd35b58b044b2d210398c1f2b8d7d296"
 dependencies = [
  "bitflags 2.6.0",
  "kvm-bindings",
@@ -1490,7 +1490,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 [[package]]
 name = "tdx"
 version = "0.1.0"
-source = "git+https://github.com/jakecorrenti/tdx.git?branch=libkrun-modifications#a6dec7d231edee81adf329baf5864a1d0f3724ff"
+source = "git+https://github.com/jakecorrenti/tdx.git?branch=upstream-bindings#412cc05f70e713838de1f7f3a971aeb7a71b82d9"
 dependencies = [
  "bitflags 2.6.0",
  "kvm-bindings",

@@ -19,9 +19,8 @@ pub struct IntelTdx {
 }
 
 impl IntelTdx {
-    pub fn new(vm_fd: &VmFd, vcpu_count: u8) -> Result<Self, Error> {
-        let vm = TdxVm::new(vm_fd, vcpu_count as u64)
-            .or_else(|_| return Err(Error::CreateTdxVmStruct))?;
+    pub fn new(vm_fd: &VmFd) -> Result<Self, Error> {
+        let vm = TdxVm::new(vm_fd).or_else(|_| return Err(Error::CreateTdxVmStruct))?;
         let caps = vm
             .get_capabilities(vm_fd)
             .or_else(|_| return Err(Error::GetCapabilities))?;
@@ -35,7 +34,7 @@ impl IntelTdx {
         cpuid: kvm_bindings::CpuId,
     ) -> Result<(), Error> {
         self.vm
-            .init_vm(fd, cpuid)
+            .init_vm(fd, &self.caps, cpuid)
             .or_else(|_| return Err(Error::InitVm))?;
 
         Ok(())

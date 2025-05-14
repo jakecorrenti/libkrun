@@ -583,7 +583,7 @@ impl Vm {
         let supported_msrs =
             arch::x86_64::msr::supported_guest_msrs(kvm).map_err(Error::GuestMSRs)?;
 
-        let tdx = IntelTdx::new(&vm_fd, vcpu_count).map_err(Error::TdxSecVirtInit)?;
+        let tdx = IntelTdx::new(&vm_fd).map_err(Error::TdxSecVirtInit)?;
         Ok(Vm {
             fd: vm_fd,
             next_mem_slot: 0,
