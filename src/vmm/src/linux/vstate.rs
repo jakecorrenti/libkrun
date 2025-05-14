@@ -1106,8 +1106,8 @@ impl Vcpu {
             arch::x86_64::regs::setup_fpu(&self.fd).map_err(Error::FPUConfiguration)?;
             arch::x86_64::regs::setup_sregs(guest_mem, &self.fd, self.id)
                 .map_err(Error::SREGSConfiguration)?;
+            arch::x86_64::interrupts::set_lint(&self.fd).map_err(Error::LocalIntConfiguration)?;
         }
-        arch::x86_64::interrupts::set_lint(&self.fd).map_err(Error::LocalIntConfiguration)?;
         Ok(())
     }
 
