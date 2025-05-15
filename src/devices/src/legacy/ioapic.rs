@@ -110,12 +110,12 @@ impl IoApic {
         vm: &VmFd,
         _irq_sender: crossbeam_channel::Sender<(IrqWorkerMessage, EventFd)>,
     ) -> Result<Self, Error> {
-        let mut cap = kvm_enable_cap {
-            cap: KVM_CAP_SPLIT_IRQCHIP,
-            ..Default::default()
-        };
-        cap.args[0] = 24;
-        vm.enable_cap(&cap)?;
+        // let mut cap = kvm_enable_cap {
+        //     cap: KVM_CAP_SPLIT_IRQCHIP,
+        //     ..Default::default()
+        // };
+        // cap.args[0] = 24;
+        // vm.enable_cap(&cap)?;
 
         let mut ioapic = Self {
             id: 0,

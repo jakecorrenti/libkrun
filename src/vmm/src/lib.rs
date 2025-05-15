@@ -288,6 +288,7 @@ impl Vmm {
         _intc: &IrqChip,
         initrd: &Option<InitrdConfig>,
         _smbios_oem_strings: &Option<Vec<String>>,
+        #[cfg(feature = "intel-tdx")] memory_regions: &Vec<crate::vstate::MeasuredRegion>,
     ) -> Result<()> {
         #[cfg(target_arch = "x86_64")]
         {
@@ -306,6 +307,11 @@ impl Vmm {
                 vcpus.len() as u8,
             )
             .map_err(Error::ConfigureSystem)?;
+
+            #[cfg(feature = "intel-tdx")]
+            self.kvm_vm()
+                .tdx_secure_virt_prepare_memory(vcpus[0].fd(), memory_regions)
+                .unwrap();
         }
 
         #[cfg(target_arch = "aarch64")]

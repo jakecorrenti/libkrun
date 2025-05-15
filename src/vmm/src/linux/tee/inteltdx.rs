@@ -33,6 +33,17 @@ impl IntelTdx {
         fd: &kvm_ioctls::VmFd,
         cpuid: kvm_bindings::CpuId,
     ) -> Result<(), Error> {
+        let mut cap = kvm_bindings::kvm_enable_cap {
+            cap: kvm_bindings::KVM_CAP_SPLIT_IRQCHIP,
+            ..Default::default()
+        };
+        cap.args[0] = 24;
+        fd.enable_cap(&cap).unwrap();
+
+        cap.cap = 237;
+        cap.args[0] = 40;
+        fd.enable_cap(&cap).unwrap();
+
         self.vm
             .init_vm(fd, &self.caps, cpuid)
             .or_else(|_| return Err(Error::InitVm))?;
@@ -42,7 +53,7 @@ impl IntelTdx {
 
     pub fn configure_td_memory(
         &self,
-        fd: &kvm_ioctls::VmFd,
+        fd: &kvm_ioctls::VcpuFd,
         regions: &Vec<crate::vstate::MeasuredRegion>,
     ) -> Result<(), Error> {
         for region in regions {
@@ -52,7 +63,7 @@ impl IntelTdx {
                 0
             };
 
-            if let Err(e) = self.vm.init_mem_region(
+            if let Err(e) = tdx::launch::TdxVcpu::init_mem_region(
                 fd,
                 region.guest_addr,
                 (region.size / 4096) as u64,
