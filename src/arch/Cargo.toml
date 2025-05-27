@@ -20,8 +20,9 @@ utils = { path = "../utils" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-bindings = { git = "https://github.com/virtee/kvm-bindings.git", branch = "main", features = ["fam-wrappers"]}
-kvm-ioctls = { git = "https://github.com/virtee/kvm-ioctls.git", branch = "main"}
-tdx = { git = "https://github.com/jakecorrenti/tdx.git", branch = "upstream-bindings", optional = true }
+kvm-ioctls = { git = "https://github.com/jakecorrenti/kvm-ioctls.git", branch = "hypercall-exit"}
+# tdx = { git = "https://github.com/jakecorrenti/tdx.git", branch = "upstream-bindings", optional = true }
+tdx = { path = "../../../tdx", optional = true }
 
 [dev-dependencies]
 utils = { path = "../utils" }

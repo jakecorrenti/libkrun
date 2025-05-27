@@ -815,7 +815,7 @@ dependencies = [
 [[package]]
 name = "kvm-ioctls"
 version = "0.16.0"
-source = "git+https://github.com/virtee/kvm-ioctls.git?branch=main#55e0d72682c9fef1cda301a938b87ce4292a746d"
+source = "git+https://github.com/jakecorrenti/kvm-ioctls.git?branch=hypercall-exit#833e6d0ec7439d535a522d792b6be515990460f5"
 dependencies = [
  "bitflags 2.9.0",
  "kvm-bindings",
@@ -1586,7 +1586,6 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 [[package]]
 name = "tdx"
 version = "0.1.0"
-source = "git+https://github.com/jakecorrenti/tdx.git?branch=upstream-bindings#1ce2f3f7235ecc98104a92f15e78d03c8cdc69eb"
 dependencies = [
  "bitflags 2.9.0",
  "kvm-bindings",

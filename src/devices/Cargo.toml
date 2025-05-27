@@ -45,7 +45,7 @@ lru = ">=0.9"
 rutabaga_gfx = { path = "../rutabaga_gfx", features = ["x"], optional = true }
 caps = "0.5.5"
 kvm-bindings = { git = "https://github.com/virtee/kvm-bindings.git", branch = "main", features = ["fam-wrappers"]}
-kvm-ioctls = { git = "https://github.com/virtee/kvm-ioctls.git", branch = "main"}
+kvm-ioctls = { git = "https://github.com/jakecorrenti/kvm-ioctls.git", branch = "hypercall-exit"}
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 vm-fdt = ">= 0.2.0"
