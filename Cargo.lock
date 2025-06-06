@@ -342,7 +342,7 @@ version = "0.1.0"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
- "vmm-sys-util 0.12.1",
+ "vmm-sys-util 0.14.0",
 ]
 
 [[package]]
@@ -1586,6 +1586,7 @@ name = "tdx"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.9.0",
+ "iocuddle",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
@@ -1725,7 +1726,7 @@ dependencies = [
  "kvm-bindings",
  "libc",
  "log",
- "vmm-sys-util 0.12.1",
+ "vmm-sys-util 0.14.0",
 ]
 
 [[package]]
@@ -1807,7 +1808,7 @@ dependencies = [
  "tdx",
  "utils",
  "vm-memory",
- "vmm-sys-util 0.12.1",
+ "vmm-sys-util 0.14.0",
  "zstd",
 ]
 
