@@ -566,7 +566,7 @@ pub fn build_microvm(
     };
 
     #[cfg(feature = "intel-tdx")]
-    let _ = match tee {
+    let tdx_launcher = match tee {
         Tee::Tdx => Some(
             vm.tdx_secure_virt_prepare()
                 .map_err(StartMicrovmError::SecureVirtPrepare)?,
