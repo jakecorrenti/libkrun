@@ -49,8 +49,10 @@ zstd = "0.13"
 [target.'cfg(target_os = "linux")'.dependencies]
 # tdx = { git = "https://github.com/jakecorrenti/tdx.git", branch = "upstream-bindings", optional = true }
 tdx = { path = "../../../tdx", optional = true }
-kvm-bindings = { git = "https://github.com/virtee/kvm-bindings.git", branch = "main", features = ["fam-wrappers"]}
-kvm-ioctls = { git = "https://github.com/jakecorrenti/kvm-ioctls.git", branch = "hypercall-exit"}
+# kvm-bindings = { git = "https://github.com/virtee/kvm-bindings.git", branch = "main", features = ["fam-wrappers"]}
+# kvm-ioctls = { git = "https://github.com/jakecorrenti/kvm-ioctls.git", branch = "hypercall-exit"}
+kvm-bindings = { path = "../../../kvm/kvm-bindings",  features = ["fam-wrappers"]}
+kvm-ioctls = { path = "../../../kvm/kvm-ioctls" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 hvf = { path = "../hvf" }
