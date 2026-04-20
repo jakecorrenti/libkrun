@@ -20,6 +20,29 @@ const ENCLAVE_VSOCK_LAUNCH_ARGS_READY: u8 = 0xb7;
 
 type Result<T> = std::result::Result<T, Error>;
 
+/// Split strings serialized by libkrun's `collapse_str_array` (quoted tokens): `"a" "b" "c d"`.
+/// Naive splitting on spaces breaks arguments that contain spaces (e.g. `nginx -g "daemon off;"`).
+fn split_collapsed_str_array(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+
+    for c in s.chars() {
+        match c {
+            '"' => {
+                if in_quotes {
+                    out.push(std::mem::take(&mut cur));
+                }
+                in_quotes = !in_quotes;
+            }
+            _ if in_quotes => cur.push(c),
+            _ => {}
+        }
+    }
+
+    out
+}
+
 /// The service responsible for writing the configuration (rootfs, execution environment, and
 // optional device proxies) to the enclave.
 #[derive(Debug, Default)]
@@ -40,19 +63,8 @@ impl<'a> EnclaveArgsWriter<'a> {
     ) -> Self {
         let mut args: Vec<EnclaveArg<'a>> = Vec::new();
 
-        // Split the argv string into a vector.
-        let argv: Vec<String> = argv_str
-            .replace("\"", "")
-            .split(' ')
-            .map(|s| s.to_string())
-            .collect();
-
-        // Split the envp string into a vector.
-        let envp: Vec<String> = envp_str
-            .replace("\"", "")
-            .split(' ')
-            .map(|s| s.to_string())
-            .collect();
+        let argv = split_collapsed_str_array(argv_str);
+        let envp = split_collapsed_str_array(envp_str);
 
         // Create the initial argument list from the required arguments.
         args.append(&mut vec![
@@ -286,5 +298,28 @@ impl fmt::Display for Error {
         };
 
         write!(f, "{}", msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_collapsed_str_array;
+
+    #[test]
+    fn quoted_argv_with_spaces() {
+        let s = r#""nginx" "-g" "daemon off;""#;
+        assert_eq!(
+            split_collapsed_str_array(s),
+            vec!["nginx", "-g", "daemon off;"]
+        );
+    }
+
+    #[test]
+    fn simple_cat() {
+        let s = r#""cat" "/etc/os-release""#;
+        assert_eq!(
+            split_collapsed_str_array(s),
+            vec!["cat", "/etc/os-release"]
+        );
     }
 }
