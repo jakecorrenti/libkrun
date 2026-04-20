@@ -11,7 +11,7 @@ CFLAGS = -O2 -g -I../include
 ROOTFS_DISTRO := fedora
 ROOTFS_DIR = rootfs_$(ROOTFS_DISTRO)
 
-.PHONY: clean rootfs
+.PHONY: clean rootfs rootfs-nginx-https
 
 EXAMPLES := boot_efi chroot_vm external_kernel consoles
 ifeq ($(SEV),1)
@@ -55,6 +55,20 @@ consoles: consoles.c
 nitro: nitro.c
 	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_nitro)
 
+nitro_nginx: nitro_nginx.c
+	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_nitro)
+
+ROOTFS_NGINX_DIR = rootfs_nginx_https
+
+# Fedora + nginx (HTTPS) for nitro_nginx; requires podman.
+rootfs-nginx-https:
+	mkdir -p $(ROOTFS_NGINX_DIR)
+	podman build -t libkrun-nginx-https -f nginx-enclave/Containerfile nginx-enclave
+	-podman rm -f libkrun_nginx_export 2>/dev/null
+	podman create --name libkrun_nginx_export libkrun-nginx-https
+	podman export libkrun_nginx_export | tar xpf - -C $(ROOTFS_NGINX_DIR)
+	podman rm libkrun_nginx_export
+
 # Build the rootfs to be used with chroot_vm.
 rootfs:
 	mkdir -p $(ROOTFS_DIR)
@@ -63,4 +77,4 @@ rootfs:
 	podman rm libkrun_chroot_vm
 
 clean:
-	rm -rf chroot_vm $(ROOTFS_DIR) launch-tee boot_efi external_kernel nitro consoles
+	rm -rf chroot_vm $(ROOTFS_DIR) $(ROOTFS_NGINX_DIR) launch-tee boot_efi external_kernel nitro nitro_nginx consoles

@@ -2762,13 +2762,22 @@ fn krun_start_enter_nitro(ctx_id: u32) -> i32 {
         None => return -libc::ENOENT,
     };
 
-    let Ok(enclave) = NitroEnclave::try_from(ctx_cfg) else {
-        return -libc::EINVAL;
+    let enclave = match NitroEnclave::try_from(ctx_cfg) {
+        Ok(e) => e,
+        Err(errno) => {
+            eprintln!(
+                "libkrun: invalid Nitro VM configuration (errno {}). \
+                 Set krun_set_log_level(KRUN_LOG_LEVEL_ERROR) or higher to see which setting failed.",
+                -errno
+            );
+            return errno;
+        }
     };
 
     match enclave.run() {
         Ok(ret) => ret,
         Err(e) => {
+            eprintln!("libkrun: {e}");
             error!("Error running nitro enclave: {e}");
 
             -libc::EINVAL

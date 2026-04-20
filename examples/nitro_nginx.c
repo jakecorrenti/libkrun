@@ -1,53 +1,44 @@
 /*
- * This is an example implementing running an example AWS nitro enclave with
- * libkrun.
+ * AWS Nitro enclave example: Fedora rootfs with nginx serving HTTPS "hello world".
+ * The guest virtio-net TAP is assigned 172.31.10.83/24 (see aws-nitro init).
+ * From the host (with passt): curl -k https://172.31.10.83/
  */
 
 #include <assert.h>
 #include <errno.h>
 #include <getopt.h>
 #include <libkrun.h>
-#include <linux/vm_sockets.h>
-#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <sys/un.h>
-
-#define MAX_ARGS_LEN 4096
-#ifndef MAX_PATH
-#define MAX_PATH 4096
-#endif
-
-#define VMADDR_CID_HYPERVISOR 0
-#define CID_TO_CONSOLE_PORT_OFFSET 10000
-
-#define BUFSIZE 512
+#include <unistd.h>
 
 static void print_help(char *const name)
 {
     fprintf(
         stderr,
-        "Usage: %s ENCLAVE_IMAGE NEWROOT NVCPUS RAM_MIB\n"
-        "OPTIONS: \n"
-        "        -h    --help                Show help\n"
-        "              --net                 Enable networking with passt"
-        "              --debug               Show kernel and initramfs debug "
-        "output"
+        "Usage: %s NEWROOT NVCPUS RAM_MIB\n"
+        "OPTIONS:\n"
+        "        -h, --help     Show help\n"
+        "        -n, --net      Enable networking with passt (default: on)\n"
+        "        -N, --no-net   Disable networking\n"
+        "        -d, --debug    Kernel and initramfs debug output\n"
         "\n"
-        "NEWROOT:           The root directory of the VM\n"
-        "NVCPUS:            The amount of vCPUs for running the enclave\n"
-        "RAM_MIB:           The amount of RAM (MiB) allocated for enclave\n",
+        "Build rootfs:  make -C examples rootfs-nginx-https\n"
+        "Host test:     curl -k https://172.31.10.83/\n",
         name);
 }
 
-static const struct option long_options[] = {{"help", no_argument, NULL, 'h'},
-                                             {"net", no_argument, NULL, 'n'},
-                                             {"debug", no_argument, NULL, 'd'},
-                                             {NULL, 0, NULL, 0}};
+static const struct option long_options[] = {
+    {"help", no_argument, NULL, 'h'},
+    {"net", no_argument, NULL, 'n'},
+    {"no-net", no_argument, NULL, 'N'},
+    {"debug", no_argument, NULL, 'd'},
+    {NULL, 0, NULL, 0},
+};
 
 struct cmdline {
     bool show_help;
@@ -58,21 +49,19 @@ struct cmdline {
     bool debug;
 };
 
-bool parse_cmdline(int argc, char *const argv[], struct cmdline *cmdline)
+static bool parse_cmdline(int argc, char *const argv[], struct cmdline *cmdline)
 {
     int c, option_index = 0;
 
     assert(cmdline != NULL);
 
-    // set the defaults
     *cmdline = (struct cmdline){
         .show_help = false,
-        .net = false,
+        .net = true,
         .debug = false,
     };
 
-    // the '+' in optstring is a GNU extension that disables permutating argv
-    while ((c = getopt_long(argc, argv, "+h", long_options, &option_index)) !=
+    while ((c = getopt_long(argc, argv, "+hnNd", long_options, &option_index)) !=
            -1) {
         switch (c) {
         case 'h':
@@ -81,6 +70,9 @@ bool parse_cmdline(int argc, char *const argv[], struct cmdline *cmdline)
         case 'n':
             cmdline->net = true;
             break;
+        case 'N':
+            cmdline->net = false;
+            break;
         case 'd':
             cmdline->debug = true;
             break;
@@ -88,7 +80,7 @@ bool parse_cmdline(int argc, char *const argv[], struct cmdline *cmdline)
             return false;
         default:
             fprintf(stderr,
-                    "internal argument parsing error (returned character code "
+                    "internal argument parsing error (returned character "
                     "0x%x)\n",
                     c);
             return false;
@@ -112,15 +104,15 @@ bool parse_cmdline(int argc, char *const argv[], struct cmdline *cmdline)
     return false;
 }
 
-const char *const default_argv[] = {"cat", "/etc/os-release", NULL};
+static const char *const nginx_argv[] = {"nginx", "-g", "daemon off;", NULL};
 
 #define DEFAULT_PATH_ENV "PATH=/sbin:/usr/sbin:/bin:/usr/bin"
-const char *const default_envp[] = {
+static const char *const default_envp[] = {
     DEFAULT_PATH_ENV,
     NULL,
 };
 
-int start_passt()
+static int start_passt(void)
 {
     int socket_fds[2];
     const int PARENT = 0;
@@ -137,34 +129,30 @@ int start_passt()
         return -1;
     }
 
-    if (pid == 0) { // child
-        if (close(socket_fds[PARENT]) < 0) {
+    if (pid == 0) {
+        if (close(socket_fds[PARENT]) < 0)
             perror("close PARENT");
-        }
 
         char fd_as_str[16];
         snprintf(fd_as_str, sizeof(fd_as_str), "%d", socket_fds[CHILD]);
 
-        printf("passing fd %s to passt", fd_as_str);
-
-        if (execlp("passt", "passt", "-t", "all", "-f", "--fd", fd_as_str,
-                   NULL) < 0) {
+        if (execlp("passt", "passt", "-t", "all", "-f", "--fd", fd_as_str, NULL) <
+            0) {
             perror("execlp");
-            return -1;
+            _exit(1);
         }
-
-    } else { // parent
-        if (close(socket_fds[CHILD]) < 0) {
-            perror("close CHILD");
-        }
-
-        return socket_fds[PARENT];
+        _exit(1);
     }
+
+    if (close(socket_fds[CHILD]) < 0)
+        perror("close CHILD");
+
+    return socket_fds[PARENT];
 }
 
 int main(int argc, char *const argv[])
 {
-    int ret, cid, ctx_id, err, passt_fd, log_level;
+    int cid, ctx_id, err, passt_fd, log_level;
     struct cmdline cmdline;
 
     if (!parse_cmdline(argc, argv, &cmdline)) {
@@ -178,7 +166,6 @@ int main(int argc, char *const argv[])
         return 0;
     }
 
-    /* ERROR by default so libkrun logs (e.g. missing rootfs/EIF) are visible. */
     log_level =
         (cmdline.debug) ? KRUN_LOG_LEVEL_DEBUG : KRUN_LOG_LEVEL_ERROR;
     err = krun_set_log_level(log_level);
@@ -188,7 +175,6 @@ int main(int argc, char *const argv[])
         return -1;
     }
 
-    // Create the configuration context.
     ctx_id = krun_create_ctx();
     if (ctx_id < 0) {
         errno = -ctx_id;
@@ -196,30 +182,26 @@ int main(int argc, char *const argv[])
         return -1;
     }
 
-    // Configure the number of vCPUs and amount of RAM.
-    if (err = krun_set_vm_config(ctx_id, cmdline.nvcpus, cmdline.ram_mib)) {
+    if ((err = krun_set_vm_config(ctx_id, cmdline.nvcpus, cmdline.ram_mib))) {
         errno = -err;
         perror(
             "Error configuring the number of vCPUs and/or the amount of RAM");
         return -1;
     }
 
-    if (err = krun_set_console_output(ctx_id, "/dev/stdout")) {
+    if ((err = krun_set_console_output(ctx_id, "/dev/stdout"))) {
         errno = -err;
         perror("Error configuring the console output");
         return -1;
     }
 
-    // Configure the enclave's rootfs.
-    if (err = krun_set_root(ctx_id, cmdline.new_root)) {
+    if ((err = krun_set_root(ctx_id, cmdline.new_root))) {
         errno = -err;
         perror("Error configuring enclave rootfs");
         return -1;
     }
 
-    // Configure the enclave's execution environment.
-    if (err = krun_set_exec(ctx_id, default_argv[0], default_argv,
-                            default_envp)) {
+    if ((err = krun_set_exec(ctx_id, nginx_argv[0], nginx_argv, default_envp))) {
         errno = -err;
         perror("Error configuring enclave execution path");
         return -1;
@@ -230,22 +212,18 @@ int main(int argc, char *const argv[])
 
         passt_fd = start_passt();
         if (passt_fd < 0) {
-            printf("unable to start passt socket pair\n");
+            fprintf(stderr, "unable to start passt socket pair\n");
             return -1;
         }
 
-        if (err = krun_add_net_unixstream(ctx_id, NULL, passt_fd, &mac[0],
-                                          COMPAT_NET_FEATURES, 0)) {
+        if ((err = krun_add_net_unixstream(ctx_id, NULL, passt_fd, &mac[0],
+                                           COMPAT_NET_FEATURES, 0))) {
             errno = -err;
             perror("Error configuring net mode");
             return -1;
         }
     }
 
-    /*
-     * Start and enter the microVM. In the libkrun-awsnitro flavor, a positive
-     * value returned by krun_start_enter() is the enclave's CID.
-     */
     cid = krun_start_enter(ctx_id);
     if (cid < 0) {
         errno = -cid;
