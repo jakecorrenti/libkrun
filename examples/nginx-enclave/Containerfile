@@ -13,5 +13,8 @@ RUN rm -f /etc/nginx/conf.d/default.conf
 
 COPY hello-world.conf /etc/nginx/conf.d/hello-world.conf
 
-# libkrun aws-nitro runs a single process; keep nginx in the foreground.
-CMD ["nginx", "-g", "daemon off;"]
+# Foreground master (PID 1) without relying on CMD argv quoting: many runners split
+# `nginx -g daemon off;` into separate tokens ("off;" becomes a bogus flag).
+RUN sed -i '/^pid /i daemon off;' /etc/nginx/nginx.conf
+
+CMD ["nginx"]
