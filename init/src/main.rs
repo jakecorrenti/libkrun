@@ -1,18 +1,27 @@
+#[cfg(target_os = "linux")]
+mod dhcp;
+
 use std::env;
 use std::ffi::{CStr, CString};
 use std::fs::{self, DirBuilder};
 use std::io::ErrorKind;
+use std::mem;
 use std::os::unix::fs::DirBuilderExt;
 
 use anyhow::{Context, anyhow};
 
 use rustix::fs::{self as rustix_fs, Mode, OFlags};
 use rustix::io::Errno;
-use rustix::ioctl::{self, NoArg, Opcode};
+use rustix::ioctl::{self, NoArg, Opcode, Updater};
 use rustix::mount::{self, MountFlags, MountPropagationFlags};
+use rustix::net::{self, AddressFamily, SocketType};
 use rustix::process;
 
+use libc::{IFF_UP, ifreq};
+
 const KRUN_REMOVE_ROOT_DIR_IOCTL: Opcode = 0x7603;
+const SIOCGIFFLAGS: Opcode = 0x8913;
+const SIOCSIFFLAGS: Opcode = 0x8914;
 
 #[cfg(target_os = "linux")]
 fn mkdir_if_missing(path: &str) -> anyhow::Result<()> {
@@ -142,6 +151,47 @@ fn setup_block_root() -> anyhow::Result<()> {
     .context("setting shared propagation on /")
 }
 
+#[cfg(target_os = "linux")]
+fn ifreq_with_name(name: &[u8]) -> ifreq {
+    let mut ifr: ifreq = unsafe { mem::zeroed() };
+    for (dst, src) in ifr.ifr_name.iter_mut().zip(name) {
+        *dst = *src as libc::c_char;
+    }
+    ifr
+}
+
+/// Brings up `lo` unconditionally, then optionally brings up `eth0` and runs
+/// DHCP on it when `KRUN_DHCP=1`. Mirrors lines 1296–1320 of init.c.
+#[cfg(target_os = "linux")]
+fn setup_network() {
+    let Ok(sock) = net::socket(AddressFamily::INET, SocketType::DGRAM, None) else {
+        return;
+    };
+
+    // Bring up lo.
+    let mut ifr = ifreq_with_name(b"lo\0");
+    unsafe {
+        ifr.ifr_ifru.ifru_flags |= IFF_UP as libc::c_short;
+        ioctl::ioctl(&sock, Updater::<SIOCSIFFLAGS, ifreq>::new(&mut ifr)).ok();
+    }
+
+    if env::var("KRUN_DHCP").as_deref() != Ok("1") {
+        return;
+    }
+    // Check whether eth0 exists via SIOCGIFFLAGS.
+    let mut ifr = ifreq_with_name(b"eth0\0");
+    unsafe {
+        if ioctl::ioctl(&sock, Updater::<SIOCGIFFLAGS, ifreq>::new(&mut ifr)).is_ok() {
+            // eth0 exists — bring it up.
+            ifr.ifr_ifru.ifru_flags |= IFF_UP as libc::c_short;
+            ioctl::ioctl(&sock, Updater::<SIOCSIFFLAGS, ifreq>::new(&mut ifr)).ok();
+        }
+    }
+    if let Err(e) = dhcp::do_dhcp("eth0") {
+        eprintln!("Warning: DHCP configuration for eth0 failed: {e}");
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     mount_filesystems()?;
@@ -152,6 +202,9 @@ fn main() -> anyhow::Result<()> {
     // Start a new session and attach the terminal.
     process::setsid().ok();
     process::ioctl_tiocsctty(rustix::stdio::stdin()).ok();
+
+    #[cfg(target_os = "linux")]
+    setup_network();
 
     Ok(())
 }
