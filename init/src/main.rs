@@ -290,6 +290,43 @@ fn parse_config(path: &str) -> Option<Config> {
     Some(Config { argv, workdir })
 }
 
+/// Parses and applies a comma-separated list of rlimit triplets.
+/// Format: `<id>=<soft>:<hard>[,<id>=<soft>:<hard>...]`
+/// Mirrors `set_rlimits()` in init.c.
+fn set_rlimits(spec: &str) {
+    for item in spec.split(',') {
+        // Split on '=' first to separate the resource ID from "soft:hard",
+        // then split the remainder on ':'. This matches the format produced
+        // by krun_set_rlimits() and documented in libkrun.h.
+        let Some((id_str, limits_str)) = item.split_once('=') else {
+            eprintln!("Invalid rlimit entry: {item}");
+            continue;
+        };
+        let Some((cur_str, max_str)) = limits_str.split_once(':') else {
+            eprintln!("Invalid rlimit entry: {item}");
+            continue;
+        };
+        let Some((id, cur, max)) = (|| -> Option<_> {
+            Some((
+                id_str.trim().parse::<libc::__rlimit_resource_t>().ok()?,
+                cur_str.trim().parse::<libc::rlim_t>().ok()?,
+                max_str.trim().parse::<libc::rlim_t>().ok()?,
+            ))
+        })() else {
+            eprintln!("Invalid rlimit values: {item}");
+            continue;
+        };
+        let rlim = libc::rlimit {
+            rlim_cur: cur,
+            rlim_max: max,
+        };
+        // SAFETY: `rlim` is a valid, stack-allocated `rlimit`.
+        if unsafe { libc::setrlimit(id, &rlim) } != 0 {
+            eprintln!("Error setting rlimit for ID={id}");
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     mount_filesystems()?;
@@ -306,6 +343,50 @@ fn main() -> anyhow::Result<()> {
 
     let path = env::var("KRUN_CONFIG").unwrap_or_else(|_| String::from("/.krun_config.json"));
     let config = parse_config(&path).unwrap_or_default();
+
+    // Lines 1345-1353: KRUN_HOME / KRUN_TERM override env vars.
+    if let Ok(krun_home) = env::var("KRUN_HOME") {
+        // SAFETY: init runs single-threaded at this point; no concurrent
+        // threads can observe the environment change.
+        unsafe { env::set_var("HOME", krun_home) };
+    }
+    if let Ok(krun_term) = env::var("KRUN_TERM") {
+        // SAFETY: same as above.
+        unsafe { env::set_var("TERM", krun_term) };
+    }
+
+    // Lines 1355-1360: set hostname, defaulting to "localhost".
+    let name = env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_owned());
+    if let Err(e) = rustix::system::sethostname(name.as_bytes()) {
+        eprintln!("Warning: sethostname failed: {e}");
+    }
+
+    // Lines 1362-1365: parse and apply rlimits from KRUN_RLIMITS.
+    if let Ok(rlimits) = env::var("KRUN_RLIMITS") {
+        set_rlimits(&rlimits);
+    }
+
+    // Lines 1367-1372: choose working directory (env overrides config).
+    let workdir = env::var("KRUN_WORKDIR").ok().or(config.workdir);
+    if let Some(ref dir) = workdir
+        && let Err(e) = env::set_current_dir(dir)
+    {
+        eprintln!("chdir({dir}): {e}");
+    }
+
+    // Lines 1374-1388: resolve the argv to exec and whether to run as PID 1.
+    let exec_argv: Vec<String> = if let Ok(krun_init) = env::var("KRUN_INIT") {
+        // KRUN_INIT overrides everything: use it as the sole executable.
+        vec![krun_init]
+    } else if let Some(cfg_argv) = config.argv {
+        cfg_argv
+    } else {
+        vec!["/bin/sh".to_owned()]
+    };
+
+    let init_pid1 = env::var("KRUN_INIT_PID1").as_deref() == Ok("1");
+
+    let _ = (exec_argv, init_pid1); // consumed by exec logic (not yet ported)
 
     Ok(())
 }
