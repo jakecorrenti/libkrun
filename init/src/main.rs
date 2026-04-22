@@ -4,22 +4,25 @@ mod dhcp;
 use std::env;
 use std::ffi::{CStr, CString};
 use std::fs::{self, DirBuilder};
-use std::io::ErrorKind;
+use std::io::{Error as IoError, ErrorKind};
 use std::mem;
 use std::os::unix::fs::DirBuilderExt;
+use std::process;
 
 use anyhow::{Context, anyhow};
 
 use rustix::fs::{self as rustix_fs, Mode, OFlags};
-use rustix::io::Errno;
-use rustix::ioctl::{self, NoArg, Opcode, Updater};
+use rustix::io::{self as rustix_io, Errno};
+use rustix::ioctl::{self, IntegerSetter, NoArg, Opcode, Updater};
 use rustix::mount::{self, MountFlags, MountPropagationFlags};
 use rustix::net::{self, AddressFamily, SocketType};
-use rustix::process;
+use rustix::process::{self as rustix_process, Pid, WaitOptions};
+use rustix::stdio;
 
 use libc::{IFF_UP, ifreq};
 
 const KRUN_REMOVE_ROOT_DIR_IOCTL: Opcode = 0x7603;
+const KRUN_EXIT_CODE_IOCTL: Opcode = 0x7602;
 const SIOCGIFFLAGS: Opcode = 0x8913;
 const SIOCSIFFLAGS: Opcode = 0x8914;
 
@@ -138,7 +141,7 @@ fn setup_block_root() -> anyhow::Result<()> {
         }
 
         mount::mount_move(".", "/").context("mount_move . -> /")?;
-        process::chroot(".").context("chroot .")?;
+        rustix_process::chroot(".").context("chroot .")?;
 
         // Filesystems must be remounted after the chroot.
         mount_filesystems()?;
@@ -209,9 +212,9 @@ fn config_parse_env(arr: &serde_json::Value) {
     };
     for entry in entries {
         let Some(s) = entry.as_str() else { continue };
-        let Some(eq) = s.find('=') else { continue };
-        let key = &s[..eq];
-        let val = &s[eq + 1..];
+        let Some((key, val)) = s.split_once('=') else {
+            continue;
+        };
         if key == "HOME" || key == "TERM" || env::var_os(key).is_none() {
             // SAFETY: init runs single-threaded at this point; no concurrent
             // threads can observe the environment change.
@@ -290,6 +293,118 @@ fn parse_config(path: &str) -> Option<Config> {
     Some(Config { argv, workdir })
 }
 
+/// Redirects stdin/stdout/stderr to named virtio-console ports when present.
+/// Scans `/sys/class/virtio-ports/*/name` for `krun-stdin`, `krun-stdout`,
+/// `krun-stderr` and `dup2`s the matching `/dev/<port>` onto the standard fds.
+/// Mirrors `setup_redirects()` + `reopen_fd()` in init.c.
+#[cfg(target_os = "linux")]
+fn setup_redirects() -> anyhow::Result<()> {
+    let ports_dir =
+        fs::read_dir("/sys/class/virtio-ports").context("Unable to open ports directory")?;
+
+    for entry in ports_dir.flatten() {
+        let name_path = entry.path().join("name");
+        let Ok(port_name) = fs::read_to_string(&name_path) else {
+            continue;
+        };
+
+        let dev_path = format!("/dev/{}", entry.file_name().to_string_lossy());
+
+        let trimmed = port_name.trim();
+        let (flags, dup2_fn): (OFlags, fn(rustix::fd::OwnedFd) -> rustix_io::Result<()>) =
+            match trimmed {
+                "krun-stdin" => (OFlags::RDONLY, stdio::dup2_stdin),
+                "krun-stdout" => (OFlags::WRONLY, stdio::dup2_stdout),
+                "krun-stderr" => (OFlags::WRONLY, stdio::dup2_stderr),
+                _ => continue,
+            };
+
+        let result: anyhow::Result<()> = (|| {
+            let fd = rustix_fs::open(&dev_path, flags, Mode::empty())
+                .with_context(|| format!("opening '{dev_path}'"))?;
+            dup2_fn(fd).with_context(|| format!("dup2 onto {trimmed}"))?;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            eprintln!("{e:#}");
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn setup_redirects() -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Reports the workload exit code back to the hypervisor via a virtiofs ioctl,
+/// but only when `/` is on a virtiofs mount.
+/// Mirrors `set_exit_code()` in init.c.
+fn set_exit_code(code: libc::c_int) {
+    if let Err(e) = try_set_exit_code(code) {
+        eprintln!("Warning: failed to report exit code: {e:#}");
+    }
+}
+
+fn try_set_exit_code(code: libc::c_int) -> anyhow::Result<()> {
+    const VIRTIOFS_MAGIC: rustix_fs::FsWord = 0x6573_5546;
+
+    let statfs = rustix_fs::statfs("/").context("could not determine filesystem type for root")?;
+
+    if statfs.f_type != VIRTIOFS_MAGIC {
+        return Ok(());
+    }
+
+    let fd = rustix_fs::open("/", OFlags::RDONLY, Mode::empty())
+        .context("couldn't open root filesystem to report exit code")?;
+
+    // SAFETY: `IntegerSetter` encodes the exit code as a plain integer ioctl argument.
+    unsafe {
+        ioctl::ioctl(
+            &fd,
+            IntegerSetter::<KRUN_EXIT_CODE_IOCTL>::new_usize(code as usize),
+        )
+    }
+    .context("ioctl to set exit code failed")?;
+
+    Ok(())
+}
+
+/// `execvp`s into `argv[0]` with `argv` as the argument list.
+/// Prints a diagnostic and exits with 126/127 on failure (matching podman/chroot).
+/// Never returns on success.
+fn do_exec(argv: &[String]) -> ! {
+    let c_args: Vec<CString> = argv
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            CString::new(a.as_bytes()).unwrap_or_else(|_| {
+                eprintln!("argv[{i}] contains a null byte");
+                set_exit_code(126);
+                process::exit(126);
+            })
+        })
+        .collect();
+
+    let mut ptrs: Vec<*const libc::c_char> = c_args.iter().map(|s| s.as_ptr()).collect();
+    ptrs.push(std::ptr::null());
+
+    unsafe {
+        libc::execvp(ptrs[0], ptrs.as_ptr());
+    }
+    // execvp only returns on failure; read errno immediately.
+    let err = IoError::last_os_error();
+    eprintln!("Couldn't execute '{}' inside the vm: {err}", argv[0]);
+    let code = if Errno::from_io_error(&err) == Some(Errno::NOENT) {
+        127
+    } else {
+        126
+    };
+    set_exit_code(code);
+    process::exit(code);
+}
+
 /// Parses and applies a comma-separated list of rlimit triplets.
 /// Format: `<id>=<soft>:<hard>[,<id>=<soft>:<hard>...]`
 /// Mirrors `set_rlimits()` in init.c.
@@ -335,8 +450,8 @@ fn main() -> anyhow::Result<()> {
     setup_block_root()?;
 
     // Start a new session and attach the terminal.
-    process::setsid().ok();
-    process::ioctl_tiocsctty(rustix::stdio::stdin()).ok();
+    rustix_process::setsid().ok();
+    rustix_process::ioctl_tiocsctty(stdio::stdin()).ok();
 
     #[cfg(target_os = "linux")]
     setup_network();
@@ -386,7 +501,52 @@ fn main() -> anyhow::Result<()> {
 
     let init_pid1 = env::var("KRUN_INIT_PID1").as_deref() == Ok("1");
 
-    let _ = (exec_argv, init_pid1); // consumed by exec logic (not yet ported)
+    // Lines 1396-1444: fork (unless PID 1 mode), redirect stdio to virtio-console
+    // ports, exec the workload, and forward its exit code.
+    if init_pid1 {
+        // Running as PID 1: exec directly in this process.
+        setup_redirects()?;
+        do_exec(&exec_argv);
+    } else {
+        // Fork so that PID 1 (us) can reap children and forward the exit code.
+        // SAFETY: standard fork precautions apply; we exec or exit in the child.
+        let child_pid = match Pid::from_raw(unsafe { libc::fork() }) {
+            None => {
+                // Child process (fork returned 0): redirect stdio then exec.
+                setup_redirects()?;
+                do_exec(&exec_argv);
+            }
+            Some(pid) if pid.as_raw_nonzero().get() > 0 => pid,
+            _ => {
+                let err = IoError::last_os_error();
+                eprintln!("fork: {err}");
+                set_exit_code(125);
+                process::exit(125);
+            }
+        };
+
+        // Parent: reap children until we see our direct child exit.
+        let code = loop {
+            match rustix_process::waitpid(None, WaitOptions::empty()) {
+                Ok(Some((pid, status))) if pid == child_pid => {
+                    break if let Some(exit_code) = status.exit_status() {
+                        exit_code
+                    } else if let Some(signal) = status.terminating_signal() {
+                        signal + 128
+                    } else {
+                        0
+                    };
+                }
+                Ok(_) => continue,
+                Err(e) => {
+                    eprintln!("waitpid: {e}");
+                    break 0;
+                }
+            }
+        };
+
+        set_exit_code(code);
+    }
 
     Ok(())
 }
