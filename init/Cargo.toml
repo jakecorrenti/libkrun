@@ -10,3 +10,4 @@ name = "init"
 anyhow = "1.0"
 libc = "0.2"
 rustix = { version = "1.1", features = ["fs", "mount", "net", "process", "stdio"] }
+serde_json = "1.0"

@@ -192,6 +192,104 @@ fn setup_network() {
     }
 }
 
+/// Holds the parsed values produced by `config_parse_file`.
+/// Mirrors the `config_argv` / `config_workdir` locals in main().
+#[derive(Default)]
+struct Config {
+    argv: Option<Vec<String>>,
+    workdir: Option<String>,
+}
+
+/// Parses env vars out of a JSON array value and calls `std::env::set_var`.
+/// Mirrors `config_parse_env()` in init.c.
+/// HOME and TERM always overwrite; all other vars are set only if not already present.
+fn config_parse_env(arr: &serde_json::Value) {
+    let Some(entries) = arr.as_array() else {
+        return;
+    };
+    for entry in entries {
+        let Some(s) = entry.as_str() else { continue };
+        let Some(eq) = s.find('=') else { continue };
+        let key = &s[..eq];
+        let val = &s[eq + 1..];
+        if key == "HOME" || key == "TERM" || env::var_os(key).is_none() {
+            // SAFETY: init runs single-threaded at this point; no concurrent
+            // threads can observe the environment change.
+            unsafe { env::set_var(key, val) };
+        }
+    }
+}
+
+/// Parses a JSON array of strings into a `Vec<String>`.
+/// Returns `None` when the array is empty (mirrors the C returning NULL for 0 args).
+/// Mirrors `config_parse_args()` in init.c.
+fn config_parse_args(arr: &serde_json::Value) -> Option<Vec<String>> {
+    let entries: Vec<String> = arr
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    (!entries.is_empty()).then_some(entries)
+}
+
+/// Case-insensitive key lookup
+///
+/// Find a key in the JSON object that matches any of the provided keys and return the value
+/// associated with it.
+fn get_config_val<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<&'a serde_json::Value> {
+    obj.iter()
+        .find(|(k, _)| keys.iter().any(|&q| k.eq_ignore_ascii_case(q)))
+        .map(|(_, v)| v)
+}
+
+/// Reads, parses, and extracts fields from a krun JSON config file.
+///
+/// Recognised top-level keys (all case-insensitive via serde_json's string matching):
+///   "Env"        – array of "KEY=VALUE" strings → set as environment variables
+///   "args" / "Cmd"        – array of strings → argv
+///   "Entrypoint"          – array of strings → prepended to argv
+///   "WorkingDir" / "Cwd"  – string → working directory
+fn parse_config(path: &str) -> Option<Config> {
+    let text = fs::read_to_string(path).ok()?;
+
+    let root: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| eprintln!("Error parsing config file: {e}"))
+        .ok()?;
+
+    let obj = root
+        .as_object()
+        .ok_or_else(|| eprintln!("Couldn't find object in config file"))
+        .ok()?;
+
+    if let Some(env) = get_config_val(obj, &["Env"]) {
+        config_parse_env(env);
+    }
+
+    let cmd_argv = get_config_val(obj, &["args", "Cmd"]).and_then(config_parse_args);
+    let entrypoint = get_config_val(obj, &["Entrypoint"]).and_then(config_parse_args);
+
+    // Concatenate the entrypoint first, then the cmd args.
+    let argv = match (entrypoint, cmd_argv) {
+        (Some(mut ep), Some(cmd)) => {
+            ep.extend(cmd);
+            Some(ep)
+        }
+        (Some(ep), None) => Some(ep),
+        (None, cmd) => cmd,
+    };
+
+    // Get the workdir and convert it to an owned String if it's not empty
+    let workdir = get_config_val(obj, &["WorkingDir", "Cwd"])
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+
+    Some(Config { argv, workdir })
+}
+
 fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     mount_filesystems()?;
@@ -205,6 +303,9 @@ fn main() -> anyhow::Result<()> {
 
     #[cfg(target_os = "linux")]
     setup_network();
+
+    let path = env::var("KRUN_CONFIG").unwrap_or_else(|_| String::from("/.krun_config.json"));
+    let config = parse_config(&path).unwrap_or_default();
 
     Ok(())
 }
