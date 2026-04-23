@@ -43,13 +43,26 @@ fn build_default_init() -> PathBuf {
         }
     };
 
-    let status = Command::new(&cargo)
-        .args(["build", "--release", "--manifest-path"])
+    // Mirror any features that must be forwarded to the init crate.
+    // CARGO_FEATURE_<NAME> is set by Cargo when a feature is active on this crate.
+    let mut init_features: Vec<&str> = Vec::new();
+    if std::env::var_os("CARGO_FEATURE_TIMESYNC").is_some() {
+        init_features.push("timesync");
+    }
+
+    let mut cmd = Command::new(&cargo);
+    cmd.args(["build", "--release", "--manifest-path"])
         .arg(&init_manifest)
         .args(["--target", &target])
         .arg("--target-dir")
         .arg(&init_target_dir)
-        .env("RUSTFLAGS", rustflags)
+        .env("RUSTFLAGS", rustflags);
+
+    if !init_features.is_empty() {
+        cmd.args(["--features", &init_features.join(",")]);
+    }
+
+    let status = cmd
         .status()
         .unwrap_or_else(|e| panic!("failed to invoke cargo for init crate: {e}"));
 

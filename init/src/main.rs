@@ -4,6 +4,9 @@ mod dhcp;
 #[cfg(target_os = "freebsd")]
 mod freebsd;
 
+#[cfg(feature = "timesync")]
+mod timesync;
+
 use std::env;
 use std::ffi::{CStr, CString};
 use std::fs::{self, DirBuilder};
@@ -548,6 +551,10 @@ fn main() -> anyhow::Result<()> {
     };
 
     let init_pid1 = env::var("KRUN_INIT_PID1").as_deref() == Ok("1");
+
+    // Lines 1389-1393: fork a detached child to keep the guest clock in sync.
+    #[cfg(feature = "timesync")]
+    timesync::spawn();
 
     // Lines 1396-1444: fork (unless PID 1 mode), redirect stdio to virtio-console
     // ports, exec the workload, and forward its exit code.

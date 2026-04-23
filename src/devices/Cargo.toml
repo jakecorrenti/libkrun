@@ -17,6 +17,7 @@ snd = ["pw", "thiserror"]
 input = ["zerocopy", "krun_input"]
 virgl_resource_map2 = []
 aws-nitro = []
+timesync = []
 test_utils = []
 
 [dependencies]

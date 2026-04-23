@@ -6,6 +6,9 @@ edition = "2024"
 [[bin]]
 name = "init"
 
+[features]
+timesync = ["rustix/time"]
+
 [dependencies]
 anyhow = "1.0"
 libc = "0.2"
