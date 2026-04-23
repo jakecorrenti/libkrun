@@ -1,6 +1,9 @@
 #[cfg(target_os = "linux")]
 mod dhcp;
 
+#[cfg(target_os = "freebsd")]
+mod freebsd;
+
 use std::env;
 use std::ffi::{CStr, CString};
 use std::fs::{self, DirBuilder};
@@ -293,6 +296,29 @@ fn parse_config(path: &str) -> Option<Config> {
     Some(Config { argv, workdir })
 }
 
+/// Resolves the config file path and parses it.
+/// Falls back to a cd9660 ISO mount when KRUN_CONFIG is unset.
+/// Mirrors lines 1322–1343 of init.c.
+#[cfg(target_os = "freebsd")]
+fn load_config() -> Config {
+    if let Ok(path) = env::var("KRUN_CONFIG") {
+        return parse_config(&path);
+    }
+    // Try mounting the KRUN_CONFIG ISO; fall back to the default path.
+    let iso = freebsd::config_file_from_iso().unwrap_or_else(|e| {
+        eprintln!("Warning: config ISO setup failed: {e:#}");
+        None
+    });
+    let (path, mounted) = iso
+        .map(|p| (p, true))
+        .unwrap_or_else(|| (CONFIG_FILE_PATH.to_owned(), false));
+    let cfg = parse_config(&path);
+    if mounted {
+        freebsd::unmount_config_iso();
+    }
+    cfg
+}
+
 /// Redirects stdin/stdout/stderr to named virtio-console ports when present.
 /// Scans `/sys/class/virtio-ports/*/name` for `krun-stdin`, `krun-stdout`,
 /// `krun-stderr` and `dup2`s the matching `/dev/<port>` onto the standard fds.
@@ -405,6 +431,17 @@ fn do_exec(argv: &[String]) -> ! {
     process::exit(code);
 }
 
+/// Dispatches to the platform-appropriate stdio redirect implementation.
+/// On Linux: scans virtio-ports. On FreeBSD: opens /dev/console via login_tty.
+fn redirect_stdio() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    setup_redirects()?;
+    #[cfg(target_os = "freebsd")]
+    freebsd::open_console();
+
+    Ok(())
+}
+
 /// Parses and applies a comma-separated list of rlimit triplets.
 /// Format: `<id>=<soft>:<hard>[,<id>=<soft>:<hard>...]`
 /// Mirrors `set_rlimits()` in init.c.
@@ -443,6 +480,10 @@ fn set_rlimits(spec: &str) {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Line 1202: FreeBSD opens the controlling console before anything else.
+    #[cfg(target_os = "freebsd")]
+    freebsd::open_console();
+
     #[cfg(target_os = "linux")]
     mount_filesystems()?;
 
@@ -453,11 +494,18 @@ fn main() -> anyhow::Result<()> {
     rustix_process::setsid().ok();
     rustix_process::ioctl_tiocsctty(stdio::stdin()).ok();
 
+    // Line 1293: FreeBSD sets the login name for the session.
+    #[cfg(target_os = "freebsd")]
+    freebsd::setlogin_root();
+
     #[cfg(target_os = "linux")]
     setup_network();
 
     let path = env::var("KRUN_CONFIG").unwrap_or_else(|_| String::from("/.krun_config.json"));
+    #[cfg(target_os = "linux")]
     let config = parse_config(&path).unwrap_or_default();
+    #[cfg(target_os = "freebsd")]
+    let config = load_config();
 
     // Lines 1345-1353: KRUN_HOME / KRUN_TERM override env vars.
     if let Ok(krun_home) = env::var("KRUN_HOME") {
@@ -505,7 +553,7 @@ fn main() -> anyhow::Result<()> {
     // ports, exec the workload, and forward its exit code.
     if init_pid1 {
         // Running as PID 1: exec directly in this process.
-        setup_redirects()?;
+        redirect_stdio()?;
         do_exec(&exec_argv);
     } else {
         // Fork so that PID 1 (us) can reap children and forward the exit code.
@@ -513,7 +561,7 @@ fn main() -> anyhow::Result<()> {
         let child_pid = match Pid::from_raw(unsafe { libc::fork() }) {
             None => {
                 // Child process (fork returned 0): redirect stdio then exec.
-                setup_redirects()?;
+                redirect_stdio()?;
                 do_exec(&exec_argv);
             }
             Some(pid) if pid.as_raw_nonzero().get() > 0 => pid,
