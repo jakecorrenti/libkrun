@@ -1,68 +1,75 @@
-use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::process::Command;
 
 fn build_default_init() -> PathBuf {
-    let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let manifest_dir = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR")
+            .expect("CARGO_MANIFEST_DIR is always set by cargo"),
+    );
     let libkrun_root = manifest_dir.join("../..");
-    let init_src = libkrun_root.join("init/init.c");
-    let dhcp_src = libkrun_root.join("init/dhcp.c");
+    let init_manifest = libkrun_root.join("init/Cargo.toml");
 
-    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
-    let init_bin = out_dir.join("init");
-
-    println!("cargo:rerun-if-env-changed=CC_LINUX");
-    println!("cargo:rerun-if-env-changed=CC");
-    println!("cargo:rerun-if-env-changed=TIMESYNC");
-    println!("cargo:rerun-if-changed={}", init_src.display());
-    println!("cargo:rerun-if-changed={}", dhcp_src.display());
+    println!("cargo:rerun-if-env-changed=KRUN_INIT_TARGET");
     println!(
         "cargo:rerun-if-changed={}",
-        libkrun_root.join("init/jsmn.h").display()
+        libkrun_root.join("init/src").display()
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        libkrun_root.join("init/dhcp.h").display()
-    );
+    println!("cargo:rerun-if-changed={}", init_manifest.display());
 
-    let mut init_cc_flags = vec!["-O2", "-static", "-Wall"];
-    if std::env::var_os("TIMESYNC").as_deref() == Some(OsStr::new("1")) {
-        init_cc_flags.push("-D__TIMESYNC__");
-    }
+    // Use the same `cargo` binary that is building libkrun so we stay on the
+    // same toolchain and pick up any rustup overrides.
+    let cargo = std::env::var_os("CARGO").expect("CARGO is always set by cargo");
 
-    let cc_value = std::env::var("CC_LINUX")
-        .or_else(|_| std::env::var("CC"))
-        .unwrap_or_else(|_| "cc".to_string());
-    let mut cc_parts = cc_value.split_ascii_whitespace();
-    let cc = cc_parts.next().expect("CC_LINUX/CC must not be empty");
-    let status = Command::new(cc)
-        .args(cc_parts)
-        .args(&init_cc_flags)
-        .arg("-o")
-        .arg(&init_bin)
-        .arg(&init_src)
-        .arg(&dhcp_src)
+    // The target for the init binary.  Defaults to the host target so we
+    // always use a toolchain that is available.  Override with
+    // KRUN_INIT_TARGET=x86_64-unknown-linux-musl (or similar) when the musl
+    // std is installed in the active toolchain.
+    let target = std::env::var("KRUN_INIT_TARGET").unwrap_or_else(|_| {
+        std::env::var("HOST").unwrap_or_else(|_| "x86_64-unknown-linux-gnu".to_string())
+    });
+
+    // The outer `cargo build` holds a lock on the workspace target directory.
+    // Give the inner build its own target dir to avoid a deadlock.
+    let init_target_dir = libkrun_root.join("init/target");
+
+    // Append our flag to any caller-supplied RUSTFLAGS rather than replacing
+    // them, so that things like custom linkers or sanitizer flags are preserved.
+    let rustflags = {
+        let existing = std::env::var("RUSTFLAGS").unwrap_or_default();
+        if existing.is_empty() {
+            "-C target-feature=+crt-static".to_string()
+        } else {
+            format!("{existing} -C target-feature=+crt-static")
+        }
+    };
+
+    let status = Command::new(&cargo)
+        .args(["build", "--release", "--manifest-path"])
+        .arg(&init_manifest)
+        .args(["--target", &target])
+        .arg("--target-dir")
+        .arg(&init_target_dir)
+        .env("RUSTFLAGS", rustflags)
         .status()
-        .unwrap_or_else(|e| panic!("failed to execute {cc}: {e}"));
+        .unwrap_or_else(|e| panic!("failed to invoke cargo for init crate: {e}"));
 
     if !status.success() {
-        panic!("failed to compile init/init.c: {status}");
+        panic!("failed to build init crate (target={target})");
     }
-    init_bin
+
+    init_target_dir.join(&target).join("release/init")
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=KRUN_INIT_BINARY_PATH");
+    println!("cargo:rerun-if-env-changed=KRUN_INIT_TARGET");
+
     let init_binary_path = std::env::var_os("KRUN_INIT_BINARY_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let init_path = build_default_init();
-            // SAFETY: The build script is single threaded.
-            unsafe { std::env::set_var("KRUN_INIT_BINARY_PATH", &init_path) };
-            init_path
-        });
+        .unwrap_or_else(build_default_init);
+
     println!(
         "cargo:rustc-env=KRUN_INIT_BINARY_PATH={}",
         init_binary_path.display()
     );
-    println!("cargo:rerun-if-env-changed=KRUN_INIT_BINARY_PATH");
 }
