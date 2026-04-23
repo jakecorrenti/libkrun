@@ -18,6 +18,7 @@ input = ["zerocopy", "krun_input"]
 virgl_resource_map2 = []
 aws-nitro = []
 timesync = []
+sev = []
 test_utils = []
 
 [dependencies]

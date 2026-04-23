@@ -18,6 +18,7 @@ input = ["krun_input", "vmm/input", "devices/input"]
 virgl_resource_map2 = ["devices/virgl_resource_map2"]
 aws-nitro = ["vmm/aws-nitro", "devices/aws-nitro", "dep:aws-nitro", "dep:nitro-enclaves"]
 timesync = ["devices/timesync"]
+sev = ["devices/sev"]
 
 [dependencies]
 crossbeam-channel = ">=0.5.15"

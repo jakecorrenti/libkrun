@@ -49,6 +49,12 @@ fn build_default_init() -> PathBuf {
     if std::env::var_os("CARGO_FEATURE_TIMESYNC").is_some() {
         init_features.push("timesync");
     }
+    if std::env::var_os("CARGO_FEATURE_TDX").is_some() {
+        init_features.push("tdx");
+    }
+    if std::env::var_os("CARGO_FEATURE_SEV").is_some() {
+        init_features.push("sev");
+    }
 
     let mut cmd = Command::new(&cargo);
     cmd.args(["build", "--release", "--manifest-path"])
@@ -56,7 +62,10 @@ fn build_default_init() -> PathBuf {
         .args(["--target", &target])
         .arg("--target-dir")
         .arg(&init_target_dir)
-        .env("RUSTFLAGS", rustflags);
+        .env("RUSTFLAGS", rustflags)
+        // Use the system OpenSSL rather than building from source when the
+        // sev feature requires it.
+        .env("OPENSSL_NO_VENDOR", "1");
 
     if !init_features.is_empty() {
         cmd.args(["--features", &init_features.join(",")]);

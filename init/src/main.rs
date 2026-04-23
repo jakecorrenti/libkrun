@@ -32,6 +32,20 @@ const KRUN_EXIT_CODE_IOCTL: Opcode = 0x7602;
 const SIOCGIFFLAGS: Opcode = 0x8913;
 const SIOCSIFFLAGS: Opcode = 0x8914;
 
+#[cfg(all(feature = "tdx", feature = "sev"))]
+fn setup_root() -> anyhow::Result<()> {
+    mkdir_if_missing("/tmp")?;
+    mkdir_if_missing("/tmp/vda")?;
+
+    do_mount("/dev/vda", "/tmp/vda", "ext4", MountFlags::RELATIME)?;
+    rustix_process::chdir("/tmp/vda").context("chdir(/tmp/vda)")?;
+
+    mount::mount_move(".", "/").context("mount(MS_MOVE . -> /)")?;
+    rustix_process::chroot(".").context("chroot(.)")?;
+
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn mkdir_if_missing(path: &str) -> anyhow::Result<()> {
     match DirBuilder::new().mode(0o755).create(path) {
@@ -489,6 +503,10 @@ fn main() -> anyhow::Result<()> {
 
     #[cfg(target_os = "linux")]
     mount_filesystems()?;
+
+    // Lines 1205-1225: mount /dev/vda as ext4, pivot and chroot into it.
+    #[cfg(all(feature = "tdx", feature = "sev"))]
+    setup_root().context("TEE root setup failed")?;
 
     #[cfg(target_os = "linux")]
     setup_block_root()?;
