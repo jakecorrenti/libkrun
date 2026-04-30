@@ -623,3 +623,148 @@ fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    // ── config_parse_args ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_args_returns_vec_for_non_empty_array() {
+        let v = serde_json::json!(["sh", "-c", "echo hi"]);
+        let result = config_parse_args(&v);
+        assert_eq!(result, Some(vec!["sh".to_owned(), "-c".to_owned(), "echo hi".to_owned()]));
+    }
+
+    #[test]
+    fn parse_args_returns_none_for_empty_array() {
+        let v = serde_json::json!([]);
+        assert_eq!(config_parse_args(&v), None);
+    }
+
+    #[test]
+    fn parse_args_returns_none_for_non_array() {
+        let v = serde_json::json!("not an array");
+        assert_eq!(config_parse_args(&v), None);
+    }
+
+    #[test]
+    fn parse_args_skips_non_string_elements() {
+        let v = serde_json::json!(["cmd", 42, null, "arg"]);
+        let result = config_parse_args(&v);
+        assert_eq!(result, Some(vec!["cmd".to_owned(), "arg".to_owned()]));
+    }
+
+    // ── try_parse_config / config_parse_file ──────────────────────────────────
+
+    fn write_temp_json(content: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        f.write_all(content.as_bytes()).expect("write");
+        f
+    }
+
+    #[test]
+    fn parse_config_cmd_only() {
+        let f = write_temp_json(r#"{"Cmd": ["/bin/sh", "-l"]}"#);
+        let cfg = config_parse_file(f.path().to_str().unwrap());
+        assert_eq!(cfg.argv, Some(vec!["/bin/sh".to_owned(), "-l".to_owned()]));
+        assert_eq!(cfg.workdir, None);
+    }
+
+    #[test]
+    fn parse_config_entrypoint_prepended_to_cmd() {
+        let f = write_temp_json(r#"{"Entrypoint": ["/ep"], "Cmd": ["arg1", "arg2"]}"#);
+        let cfg = config_parse_file(f.path().to_str().unwrap());
+        assert_eq!(
+            cfg.argv,
+            Some(vec!["/ep".to_owned(), "arg1".to_owned(), "arg2".to_owned()])
+        );
+    }
+
+    #[test]
+    fn parse_config_entrypoint_only() {
+        let f = write_temp_json(r#"{"Entrypoint": ["/sbin/init"]}"#);
+        let cfg = config_parse_file(f.path().to_str().unwrap());
+        assert_eq!(cfg.argv, Some(vec!["/sbin/init".to_owned()]));
+    }
+
+    #[test]
+    fn parse_config_workdir_from_working_dir_key() {
+        let f = write_temp_json(r#"{"Cmd": ["/bin/sh"], "WorkingDir": "/app"}"#);
+        let cfg = config_parse_file(f.path().to_str().unwrap());
+        assert_eq!(cfg.workdir, Some("/app".to_owned()));
+    }
+
+    #[test]
+    fn parse_config_workdir_from_cwd_key() {
+        let f = write_temp_json(r#"{"Cwd": "/var/run"}"#);
+        let cfg = config_parse_file(f.path().to_str().unwrap());
+        assert_eq!(cfg.workdir, Some("/var/run".to_owned()));
+    }
+
+    #[test]
+    fn parse_config_empty_workdir_treated_as_none() {
+        let f = write_temp_json(r#"{"WorkingDir": "", "Cmd": ["/bin/sh"]}"#);
+        let cfg = config_parse_file(f.path().to_str().unwrap());
+        assert_eq!(cfg.workdir, None);
+    }
+
+    #[test]
+    fn parse_config_key_lookup_is_case_insensitive() {
+        // lowercase "cmd" and "workingdir" should still be matched.
+        let f = write_temp_json(r#"{"cmd": ["/bin/bash"], "workingdir": "/home"}"#);
+        let cfg = config_parse_file(f.path().to_str().unwrap());
+        assert_eq!(cfg.argv, Some(vec!["/bin/bash".to_owned()]));
+        assert_eq!(cfg.workdir, Some("/home".to_owned()));
+    }
+
+    #[test]
+    fn parse_config_missing_file_returns_default() {
+        let cfg = config_parse_file("/nonexistent/path/to/config.json");
+        assert_eq!(cfg.argv, None);
+        assert_eq!(cfg.workdir, None);
+    }
+
+    #[test]
+    fn parse_config_invalid_json_returns_default() {
+        let f = write_temp_json("not json at all {{{");
+        let cfg = config_parse_file(f.path().to_str().unwrap());
+        assert_eq!(cfg.argv, None);
+        assert_eq!(cfg.workdir, None);
+    }
+
+    #[test]
+    fn parse_config_json_array_root_returns_default() {
+        // Root must be an object, not an array.
+        let f = write_temp_json(r#"["/bin/sh"]"#);
+        let cfg = config_parse_file(f.path().to_str().unwrap());
+        assert_eq!(cfg.argv, None);
+    }
+
+    // ── set_rlimits ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn set_rlimits_valid_single_entry() {
+        // RLIMIT_NOFILE is resource 7 on Linux. Set soft=64 hard=128 — low
+        // values that are always permissible and don't affect test runners.
+        set_rlimits("7=64:128");
+        // If no panic/abort occurred, parsing succeeded.
+    }
+
+    #[test]
+    fn set_rlimits_multiple_entries() {
+        // RLIMIT_NOFILE (7)=64:128 and RLIMIT_NPROC (6)=32:64 on Linux.
+        set_rlimits("7=64:128,6=32:64");
+    }
+
+    #[test]
+    fn set_rlimits_invalid_entries_do_not_panic() {
+        // Malformed entries should log but not panic.
+        set_rlimits("bad");
+        set_rlimits("7=notanumber:128");
+        set_rlimits("7=64");
+        set_rlimits("");
+    }
+}

@@ -606,3 +606,271 @@ pub fn do_dhcp(iface: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── align4 / nlmsg_length / rta_space ─────────────────────────────────────
+
+    #[test]
+    fn align4_already_aligned() {
+        assert_eq!(align4(0), 0);
+        assert_eq!(align4(4), 4);
+        assert_eq!(align4(8), 8);
+    }
+
+    #[test]
+    fn align4_rounds_up() {
+        assert_eq!(align4(1), 4);
+        assert_eq!(align4(2), 4);
+        assert_eq!(align4(3), 4);
+        assert_eq!(align4(5), 8);
+        assert_eq!(align4(7), 8);
+    }
+
+    #[test]
+    fn nlmsg_length_adds_header() {
+        // NLMSG_HDRLEN is align4(size_of::<nlmsghdr>()) = 16 on all platforms.
+        assert_eq!(nlmsg_length(0), NLMSG_HDRLEN);
+        assert_eq!(nlmsg_length(8), NLMSG_HDRLEN + 8);
+    }
+
+    #[test]
+    fn rta_space_is_aligned() {
+        // rta_space must always be a multiple of 4.
+        for len in 0..=32usize {
+            let s = rta_space(len);
+            assert_eq!(s % 4, 0, "rta_space({len}) = {s} is not 4-byte aligned");
+        }
+    }
+
+    #[test]
+    fn rta_space_grows_with_data() {
+        assert!(rta_space(0) <= rta_space(4));
+        assert!(rta_space(4) <= rta_space(8));
+    }
+
+    // ── OptionsWriter ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn options_writer_tlv() {
+        let mut buf = [0u8; 16];
+        let mut w = OptionsWriter::new(&mut buf);
+        w.write(53, &[1]); // DHCP Message Type = DISCOVER
+        w.end();
+        // byte 0: code=53, byte 1: len=1, byte 2: value=1, byte 3: end=0xff
+        assert_eq!(buf[0], 53);
+        assert_eq!(buf[1], 1);
+        assert_eq!(buf[2], 1);
+        assert_eq!(buf[3], 0xff);
+    }
+
+    #[test]
+    fn options_writer_flag() {
+        let mut buf = [0u8; 8];
+        let mut w = OptionsWriter::new(&mut buf);
+        w.write_flag(80); // Rapid Commit
+        w.end();
+        // byte 0: code=80, byte 1: len=0, byte 2: end=0xff
+        assert_eq!(buf[0], 80);
+        assert_eq!(buf[1], 0);
+        assert_eq!(buf[2], 0xff);
+    }
+
+    #[test]
+    fn options_writer_multiple_options() {
+        let mut buf = [0u8; 32];
+        let mut w = OptionsWriter::new(&mut buf);
+        w.write(53, &[3]);       // type = REQUEST
+        w.write(50, &[192, 168, 1, 10]); // Requested IP
+        w.end();
+        assert_eq!(buf[0], 53);  // code
+        assert_eq!(buf[1], 1);   // len
+        assert_eq!(buf[2], 3);   // REQUEST
+        assert_eq!(buf[3], 50);  // next code
+        assert_eq!(buf[4], 4);   // len
+        assert_eq!(&buf[5..9], &[192, 168, 1, 10]);
+        assert_eq!(buf[9], 0xff); // end
+    }
+
+    // ── DhcpOptions iterator ──────────────────────────────────────────────────
+
+    /// Build a minimal DHCP packet with the given raw options payload placed
+    /// at offset 240 (right after the 4-byte magic cookie).
+    fn make_dhcp_pkt(options_payload: &[u8]) -> Vec<u8> {
+        let mut pkt = vec![0u8; 240 + options_payload.len()];
+        pkt[240..].copy_from_slice(options_payload);
+        pkt
+    }
+
+    #[test]
+    fn dhcp_options_parses_single_option() {
+        // code=53, len=1, value=5 (ACK), end=0xff
+        let pkt = make_dhcp_pkt(&[53, 1, 5, 0xff]);
+        let opts: Vec<(u8, &[u8])> = DhcpOptions::new(&pkt).collect();
+        assert_eq!(opts, vec![(53u8, [5u8].as_ref())]);
+    }
+
+    #[test]
+    fn dhcp_options_stops_at_end_sentinel() {
+        let pkt = make_dhcp_pkt(&[53, 1, 2, 0xff, 1, 1, 1]);
+        let opts: Vec<_> = DhcpOptions::new(&pkt).collect();
+        assert_eq!(opts.len(), 1);
+    }
+
+    #[test]
+    fn dhcp_options_skips_padding_byte() {
+        // 0x00 is a padding byte and must be skipped.
+        let pkt = make_dhcp_pkt(&[0x00, 0x00, 53, 1, 5, 0xff]);
+        let opts: Vec<_> = DhcpOptions::new(&pkt).collect();
+        assert_eq!(opts.len(), 1);
+        assert_eq!(opts[0].0, 53);
+    }
+
+    #[test]
+    fn dhcp_options_multiple_options() {
+        // subnet mask (1), router (3), end
+        let pkt = make_dhcp_pkt(&[
+            1, 4, 255, 255, 255, 0,   // subnet mask
+            3, 4, 192, 168, 1, 1,     // router
+            0xff,
+        ]);
+        let opts: Vec<_> = DhcpOptions::new(&pkt).collect();
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].0, 1);
+        assert_eq!(opts[1].0, 3);
+    }
+
+    #[test]
+    fn dhcp_options_empty_payload_yields_nothing() {
+        let pkt = make_dhcp_pkt(&[0xff]);
+        let opts: Vec<_> = DhcpOptions::new(&pkt).collect();
+        assert!(opts.is_empty());
+    }
+
+    #[test]
+    fn dhcp_options_truncated_length_stops_safely() {
+        // len=10 but only 2 bytes follow before end of buffer.
+        let pkt = make_dhcp_pkt(&[53, 10, 1, 2]);
+        let opts: Vec<_> = DhcpOptions::new(&pkt).collect();
+        assert!(opts.is_empty());
+    }
+
+    // ── dhcp_msg_type ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn msg_type_discover() {
+        let pkt = make_dhcp_pkt(&[53, 1, 1, 0xff]);
+        assert_eq!(dhcp_msg_type(&pkt), Some(1));
+    }
+
+    #[test]
+    fn msg_type_offer() {
+        let pkt = make_dhcp_pkt(&[53, 1, DHCP_MSG_OFFER, 0xff]);
+        assert_eq!(dhcp_msg_type(&pkt), Some(DHCP_MSG_OFFER));
+    }
+
+    #[test]
+    fn msg_type_ack() {
+        let pkt = make_dhcp_pkt(&[53, 1, DHCP_MSG_ACK, 0xff]);
+        assert_eq!(dhcp_msg_type(&pkt), Some(DHCP_MSG_ACK));
+    }
+
+    #[test]
+    fn msg_type_missing_returns_none() {
+        // Only a subnet mask option, no option 53.
+        let pkt = make_dhcp_pkt(&[1, 4, 255, 255, 255, 0, 0xff]);
+        assert_eq!(dhcp_msg_type(&pkt), None);
+    }
+
+    #[test]
+    fn msg_type_option53_empty_data_skipped() {
+        // Option 53 with zero-length data must be ignored (data slice is empty).
+        let pkt = make_dhcp_pkt(&[53, 0, 0xff]);
+        assert_eq!(dhcp_msg_type(&pkt), None);
+    }
+
+    // ── handle_dhcp_ack parsing (prefix length calculation) ───────────────────
+
+    #[test]
+    fn prefix_length_from_netmask_24() {
+        let netmask = u32::from_be_bytes([255, 255, 255, 0]);
+        assert_eq!(netmask.leading_ones(), 24);
+    }
+
+    #[test]
+    fn prefix_length_from_netmask_16() {
+        let netmask = u32::from_be_bytes([255, 255, 0, 0]);
+        assert_eq!(netmask.leading_ones(), 16);
+    }
+
+    #[test]
+    fn prefix_length_from_netmask_32() {
+        let netmask = u32::from_be_bytes([255, 255, 255, 255]);
+        assert_eq!(netmask.leading_ones(), 32);
+    }
+
+    #[test]
+    fn prefix_length_from_netmask_0() {
+        let netmask = u32::from_be_bytes([0, 0, 0, 0]);
+        assert_eq!(netmask.leading_ones(), 0);
+    }
+
+    // ── MTU clamping (mirrors handle_dhcp_ack logic) ──────────────────────────
+
+    #[test]
+    fn mtu_clamp_below_minimum() {
+        let raw: u16 = 500;
+        let mtu = raw.clamp(1280, 65520);
+        assert_eq!(mtu, 1280);
+    }
+
+    #[test]
+    fn mtu_clamp_above_maximum() {
+        let raw: u16 = 65535;
+        let mtu = raw.clamp(1280, 65520);
+        assert_eq!(mtu, 65520);
+    }
+
+    #[test]
+    fn mtu_clamp_within_range() {
+        let raw: u16 = 9000;
+        let mtu = raw.clamp(1280, 65520);
+        assert_eq!(mtu, 9000);
+    }
+
+    // ── DHCP packet byte order / yiaddr extraction ────────────────────────────
+
+    #[test]
+    fn yiaddr_extracted_correctly_from_packet() {
+        // Build a minimal packet with yiaddr = 192.168.100.42 at offset 16.
+        let mut pkt = vec![0u8; 241];
+        pkt[DHCP_YIADDR_OFFSET..DHCP_YIADDR_OFFSET + 4].copy_from_slice(&[192, 168, 100, 42]);
+        let yiaddr = u32::from_be_bytes(
+            pkt[DHCP_YIADDR_OFFSET..DHCP_YIADDR_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        );
+        let addr = std::net::Ipv4Addr::from(yiaddr);
+        assert_eq!(addr, std::net::Ipv4Addr::new(192, 168, 100, 42));
+    }
+
+    // ── DhcpPacket construction ───────────────────────────────────────────────
+
+    #[test]
+    fn dhcp_packet_new_zeroed_is_all_zeros() {
+        let pkt = DhcpPacket::new_zeroed();
+        let bytes = pkt.as_bytes();
+        assert!(bytes.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn dhcp_packet_as_bytes_has_correct_size() {
+        let pkt = DhcpPacket::new_zeroed();
+        let bytes = pkt.as_bytes();
+        // RFC 2131: fixed header (236 bytes) + magic cookie (4) + options (DHCP_OPTIONS_SIZE).
+        assert_eq!(bytes.len(), mem::size_of::<DhcpPacket>());
+        assert!(bytes.len() >= 240);
+    }
+}
+
