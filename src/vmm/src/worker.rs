@@ -71,11 +71,15 @@ impl super::Vmm {
     fn convert_memory(&self, sender: Sender<bool>, properties: MemoryProperties) {
         let Some((guest_memfd, region_start)) = self.kvm_vm().guest_memfd_get(properties.gpa)
         else {
-            error!(
-                "unable to find KVM guest_memfd for memory region corresponding to GPA 0x{:x}",
-                properties.gpa
-            );
-            sender.send(false).unwrap();
+            if !properties.private {
+                sender.send(true).unwrap();
+            } else {
+                error!(
+                    "unable to find KVM guest_memfd for memory region corresponding to GPA 0x{:x}",
+                    properties.gpa
+                );
+                sender.send(false).unwrap();
+            }
             return;
         };
 
