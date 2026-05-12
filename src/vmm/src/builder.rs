@@ -757,7 +757,14 @@ pub fn build_microvm(
             let mut regions = Vec::new();
             let ram_end = arch_memory_info.ram_below_gap;
 
-            let mut fw_ranges_in_ram: Vec<(u64, u64)> = Vec::new();
+            let mut reserved_ranges: Vec<(u64, u64)> = Vec::new();
+            if vm_resources.acpi_enabled {
+                reserved_ranges.push((
+                    arch::x86_64::layout::ACPI_RSDP_ADDR,
+                    arch::x86_64::layout::ACPI_RSDP_ADDR
+                        + arch::x86_64::layout::ACPI_REGION_SIZE as u64,
+                ));
+            }
             for section in &sections {
                 let guest_addr = section.memory_address;
                 let data_size = section.memory_data_size as usize;
@@ -766,7 +773,7 @@ pub fn build_microvm(
                 }
 
                 if guest_addr < ram_end {
-                    fw_ranges_in_ram.push((guest_addr, guest_addr + data_size as u64));
+                    reserved_ranges.push((guest_addr, guest_addr + data_size as u64));
                 }
 
                 if section.raw_data_size > 0 {
@@ -792,9 +799,9 @@ pub fn build_microvm(
                 });
             }
 
-            fw_ranges_in_ram.sort_by_key(|r| r.0);
+            reserved_ranges.sort_by_key(|r| r.0);
             let mut cursor = 0u64;
-            for (start, end) in &fw_ranges_in_ram {
+            for (start, end) in &reserved_ranges {
                 if *start > cursor {
                     regions.push(MeasuredRegion {
                         guest_addr: cursor,
