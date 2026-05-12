@@ -60,6 +60,16 @@ pub const FIRMWARE_START: u64 = 0xffff_0000;
 /// The size of the firmware.
 pub const FIRMWARE_SIZE: u64 = 65536;
 
+/// ACPI RSDP address, in the edk2 scan range (0xE0000–0xFFFFF).
+#[cfg(feature = "tee")]
+pub const ACPI_RSDP_ADDR: u64 = 0xE0000;
+/// Start of remaining ACPI tables (XSDT, MADT, FADT, DSDT).
+#[cfg(feature = "tee")]
+pub const ACPI_TABLES_START: u64 = 0xE0100;
+/// Size of the entire ACPI region for measurement.
+#[cfg(feature = "tee")]
+pub const ACPI_REGION_SIZE: usize = 0x20000;
+
 /// The start of the memory area reserved for MMIO devices.
 pub const FIRST_ADDR_PAST_32BITS: u64 = 1 << 32;
 pub const MEM_32BIT_GAP_SIZE: u64 = 768 << 20;
