@@ -45,7 +45,6 @@ use vmm::resources::{
 use vmm::vmm_config::block::{BlockDeviceConfig, BlockRootConfig};
 #[cfg(not(feature = "tee"))]
 use vmm::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
-#[cfg(not(feature = "tee"))]
 use vmm::vmm_config::firmware::FirmwareConfig;
 #[cfg(not(feature = "tee"))]
 use vmm::vmm_config::fs::FsDeviceConfig;
@@ -2242,7 +2241,6 @@ pub unsafe extern "C" fn krun_set_kernel(
     KRUN_SUCCESS
 }
 
-#[cfg(not(feature = "tee"))]
 #[allow(clippy::format_collect)]
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
