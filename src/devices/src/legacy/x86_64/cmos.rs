@@ -21,6 +21,10 @@ impl Cmos {
 
         let mut data = [0u8; DATA_LEN];
 
+        // Register D: set VRT (Valid RAM and Time) bit so firmware
+        // considers the RTC functional.
+        data[0x0d] = 0x80;
+
         // Extended memory from 16 MB to 4 GB in units of 64 KB
         let ext_mem = min(
             0xFFFF,
