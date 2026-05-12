@@ -38,9 +38,9 @@ int main(int argc, char *const argv[])
     int err;
     int i;
 
-    if (argc != 4) {
+    if (argc < 4 || argc > 5) {
         printf("Invalid arguments\n");
-        printf("Usage: %s ROOT_DISK_IMAGE TEE_CONFIG_FILE DATA_DISK_IMAGE\n", argv[0]);
+        printf("Usage: %s ROOT_DISK_IMAGE TEE_CONFIG_FILE DATA_DISK_IMAGE [FIRMWARE_PATH]\n", argv[0]);
         return -1;
     }
 
@@ -118,6 +118,14 @@ int main(int argc, char *const argv[])
         errno = -err;
         perror("Error configuring the TEE config data disk");
         return -1;
+    }
+
+    if (argc == 5) {
+        if (err = krun_set_firmware(ctx_id, argv[4])) {
+            errno = -err;
+            perror("Error setting firmware path");
+            return -1;
+        }
     }
 
     if (err = krun_split_irqchip(ctx_id, true)) {
