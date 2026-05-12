@@ -755,25 +755,11 @@ pub fn build_microvm(
             let hob_size = hob_section.memory_data_size;
 
             let mut regions = Vec::new();
-            let ram_end = arch_memory_info.ram_below_gap;
-
-            let mut reserved_ranges: Vec<(u64, u64)> = Vec::new();
-            if vm_resources.acpi_enabled {
-                reserved_ranges.push((
-                    arch::x86_64::layout::ACPI_RSDP_ADDR,
-                    arch::x86_64::layout::ACPI_RSDP_ADDR
-                        + arch::x86_64::layout::ACPI_REGION_SIZE as u64,
-                ));
-            }
             for section in &sections {
                 let guest_addr = section.memory_address;
                 let data_size = section.memory_data_size as usize;
                 if data_size == 0 {
                     continue;
-                }
-
-                if guest_addr < ram_end {
-                    reserved_ranges.push((guest_addr, guest_addr + data_size as u64));
                 }
 
                 if section.raw_data_size > 0 {
@@ -796,29 +782,6 @@ pub fn build_microvm(
                         .unwrap() as u64,
                     size: data_size,
                     measured: section.attributes & 1 != 0,
-                });
-            }
-
-            reserved_ranges.sort_by_key(|r| r.0);
-            let mut cursor = 0u64;
-            for (start, end) in &reserved_ranges {
-                if *start > cursor {
-                    regions.push(MeasuredRegion {
-                        guest_addr: cursor,
-                        host_addr: guest_memory.get_host_address(GuestAddress(cursor)).unwrap()
-                            as u64,
-                        size: (*start - cursor) as usize,
-                        measured: false,
-                    });
-                }
-                cursor = *end;
-            }
-            if cursor < ram_end {
-                regions.push(MeasuredRegion {
-                    guest_addr: cursor,
-                    host_addr: guest_memory.get_host_address(GuestAddress(cursor)).unwrap() as u64,
-                    size: (ram_end - cursor) as usize,
-                    measured: false,
                 });
             }
 
@@ -867,9 +830,7 @@ pub fn build_microvm(
         serial_devices.push(setup_serial_device(
             event_manager,
             None,
-            None,
-            // Uncomment this to get EFI output when debugging EDK2.
-            //Some(Box::new(io::stdout())),
+            Some(Box::new(io::stdout())),
         )?);
     };
 
