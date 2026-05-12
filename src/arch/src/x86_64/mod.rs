@@ -5,6 +5,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
+#[cfg(feature = "tee")]
+#[allow(dead_code)]
+mod acpi;
 mod gdt;
 /// Contains logic for setting up Advanced Programmable Interrupt Controller (local version).
 pub mod interrupts;
@@ -42,6 +45,9 @@ unsafe impl ByteValued for BootParamsWrapper {}
 pub enum Error {
     /// Invalid e820 setup params.
     E820Configuration,
+    /// Error setting up ACPI tables.
+    #[cfg(feature = "tee")]
+    AcpiTableSetup(acpi::Error),
     /// Error writing MP table to memory.
     #[cfg(not(feature = "tee"))]
     MpTableSetup(mptable::Error),
