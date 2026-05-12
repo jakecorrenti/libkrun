@@ -754,7 +754,12 @@ pub fn build_microvm(
             let hob_address = hob_section.memory_address;
             let hob_size = hob_section.memory_data_size;
 
-            let mut regions = Vec::new();
+            let mut regions = vec![MeasuredRegion {
+                guest_addr: 0,
+                host_addr: guest_memory.get_host_address(GuestAddress(0)).unwrap() as u64,
+                size: arch_memory_info.ram_below_gap as usize,
+                measured: false,
+            }];
             for section in &sections {
                 let guest_addr = section.memory_address;
                 let data_size = section.memory_data_size as usize;
