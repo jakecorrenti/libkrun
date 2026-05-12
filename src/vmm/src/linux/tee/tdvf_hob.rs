@@ -4,7 +4,7 @@ const EFI_HOB_TYPE_HANDOFF: u16 = 0x0001;
 const EFI_HOB_TYPE_RESOURCE_DESCRIPTOR: u16 = 0x0003;
 const EFI_HOB_TYPE_END_OF_HOB_LIST: u16 = 0xFFFF;
 
-const EFI_RESOURCE_SYSTEM_MEMORY: u32 = 0x0000_0000;
+const EFI_RESOURCE_MEMORY_UNACCEPTED: u32 = 0x0000_0007;
 
 const EFI_RESOURCE_ATTRIBUTE_PRESENT: u32 = 0x1;
 const EFI_RESOURCE_ATTRIBUTE_INITIALIZED: u32 = 0x2;
@@ -121,7 +121,7 @@ pub fn build_hobs(
             reserved: 0,
         },
         owner: [0u8; 16],
-        resource_type: EFI_RESOURCE_SYSTEM_MEMORY,
+        resource_type: EFI_RESOURCE_MEMORY_UNACCEPTED,
         resource_attribute: SYSTEM_MEMORY_ATTRIBUTES,
         physical_start: 0,
         resource_length: ram_below_gap,
@@ -138,7 +138,7 @@ pub fn build_hobs(
                 reserved: 0,
             },
             owner: [0u8; 16],
-            resource_type: EFI_RESOURCE_SYSTEM_MEMORY,
+            resource_type: EFI_RESOURCE_MEMORY_UNACCEPTED,
             resource_attribute: SYSTEM_MEMORY_ATTRIBUTES,
             physical_start: arch::x86_64::layout::FIRST_ADDR_PAST_32BITS,
             resource_length: ram_above_gap,
