@@ -1722,7 +1722,15 @@ pub fn create_guest_memory(
         }
         #[cfg(test)]
         Payload::Empty => arch::arch_memory_regions(mem_size, None, 0, 0, None),
-        Payload::Firmware => arch::arch_memory_regions(mem_size, None, 0, 0, firmware_size),
+        Payload::Firmware => {
+            let (kernel_addr, kernel_size) =
+                if let Some(kernel_bundle) = &vm_resources.kernel_bundle {
+                    (Some(kernel_bundle.guest_addr), kernel_bundle.size)
+                } else {
+                    (None, 0)
+                };
+            arch::arch_memory_regions(mem_size, kernel_addr, kernel_size, 0, firmware_size)
+        }
     };
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     let (arch_mem_info, mut arch_mem_regions) = match payload {
