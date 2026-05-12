@@ -563,12 +563,15 @@ pub enum Payload {
 fn choose_payload(vm_resources: &VmResources) -> Result<Payload, StartMicrovmError> {
     if let Some(_kernel_bundle) = &vm_resources.kernel_bundle {
         #[cfg(feature = "tee")]
-        if vm_resources.qboot_bundle.is_none() || vm_resources.initrd_bundle.is_none() {
-            return Err(StartMicrovmError::MissingKernelConfig);
+        {
+            if vm_resources.firmware_config.is_some() {
+                return Ok(Payload::Firmware);
+            }
+            if vm_resources.qboot_bundle.is_none() || vm_resources.initrd_bundle.is_none() {
+                return Err(StartMicrovmError::MissingKernelConfig);
+            }
+            Ok(Payload::Tee)
         }
-
-        #[cfg(feature = "tee")]
-        return Ok(Payload::Tee);
 
         #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
         return Ok(Payload::KernelMmap);
