@@ -124,6 +124,15 @@ pub enum StartMicrovmError {
     FirmwareInvalidAddress(vm_memory::GuestMemoryError),
     /// Cannot read firmware contents from file.
     FirmwareRead(io::Error),
+    #[cfg(feature = "tdx")]
+    /// Failed to parse TDVF metadata from firmware.
+    TdvfParseSections(String),
+    #[cfg(feature = "tdx")]
+    /// TDVF firmware missing TdHob section.
+    TdvfMissingHobSection,
+    #[cfg(feature = "tdx")]
+    /// Failed to build HOBs in guest memory.
+    TdvfHobConstruction(String),
     /// Memory regions are overlapping or mmap fails.
     GuestMemoryMmap(String),
     /// The BZIP2 decoder couldn't decompress the kernel.
@@ -265,6 +274,18 @@ impl Display for StartMicrovmError {
             }
             FirmwareRead(ref err) => {
                 write!(f, "Cannot read firmware contents from file: {err}")
+            }
+            #[cfg(feature = "tdx")]
+            TdvfParseSections(ref err) => {
+                write!(f, "Failed to parse TDVF metadata: {err}")
+            }
+            #[cfg(feature = "tdx")]
+            TdvfMissingHobSection => {
+                write!(f, "TDVF firmware missing TdHob section")
+            }
+            #[cfg(feature = "tdx")]
+            TdvfHobConstruction(ref err) => {
+                write!(f, "Failed to build HOBs in guest memory: {err}")
             }
             GuestMemoryMmap(ref err) => {
                 // Remove imbricated quotes from error message.
@@ -715,31 +736,88 @@ pub fn build_microvm(
     };
 
     #[cfg(feature = "tdx")]
-    let measured_regions = {
+    let (measured_regions, tdvf_hob_address) = {
         println!("Injecting and measuring memory regions. This may take a while.");
-        let qboot_size = if let Some(qboot_bundle) = &vm_resources.qboot_bundle {
-            qboot_bundle.size
-        } else {
-            return Err(StartMicrovmError::MissingKernelConfig);
-        };
-        let m = vec![
-            MeasuredRegion {
-                guest_addr: 0,
-                host_addr: guest_memory.get_host_address(GuestAddress(0)).unwrap() as u64,
-                size: 0x8000_0000,
-                measured: false,
-            },
-            MeasuredRegion {
-                guest_addr: arch::FIRMWARE_START,
-                host_addr: guest_memory
-                    .get_host_address(GuestAddress(arch::FIRMWARE_START))
-                    .unwrap() as u64,
-                size: qboot_size,
-                measured: true,
-            },
-        ];
+        if let Some(firmware_config) = &vm_resources.firmware_config {
+            use std::io::{Read, Seek, SeekFrom};
+            use tdx::tdvf;
 
-        m
+            let mut firmware_file = std::fs::File::open(&firmware_config.path)
+                .map_err(StartMicrovmError::FirmwareRead)?;
+            let sections = tdvf::parse_sections(&mut firmware_file)
+                .map_err(|e| StartMicrovmError::TdvfParseSections(format!("{e}")))?;
+            let hob_section =
+                tdvf::get_hob_section(&sections).ok_or(StartMicrovmError::TdvfMissingHobSection)?;
+            let hob_address = hob_section.memory_address;
+            let hob_size = hob_section.memory_data_size;
+
+            let mut regions = Vec::new();
+            for section in &sections {
+                let guest_addr = section.memory_address;
+                let data_size = section.memory_data_size as usize;
+                if data_size == 0 {
+                    continue;
+                }
+
+                if section.raw_data_size > 0 {
+                    let mut buf = vec![0u8; section.raw_data_size as usize];
+                    firmware_file
+                        .seek(SeekFrom::Start(section.data_offset as u64))
+                        .map_err(StartMicrovmError::FirmwareRead)?;
+                    firmware_file
+                        .read_exact(&mut buf)
+                        .map_err(StartMicrovmError::FirmwareRead)?;
+                    guest_memory
+                        .write(&buf, GuestAddress(guest_addr))
+                        .map_err(StartMicrovmError::FirmwareInvalidAddress)?;
+                }
+
+                regions.push(MeasuredRegion {
+                    guest_addr,
+                    host_addr: guest_memory
+                        .get_host_address(GuestAddress(guest_addr))
+                        .unwrap() as u64,
+                    size: data_size,
+                    measured: section.attributes & 1 != 0,
+                });
+            }
+
+            crate::linux::tee::tdvf_hob::build_hobs(
+                &guest_memory,
+                hob_address,
+                hob_size,
+                arch_memory_info.ram_below_gap,
+                arch_memory_info.ram_above_gap,
+            )
+            .map_err(|e| StartMicrovmError::TdvfHobConstruction(format!("{e:?}")))?;
+
+            (regions, hob_address)
+        } else {
+            let qboot_size = if let Some(qboot_bundle) = &vm_resources.qboot_bundle {
+                qboot_bundle.size
+            } else {
+                return Err(StartMicrovmError::MissingKernelConfig);
+            };
+            (
+                vec![
+                    MeasuredRegion {
+                        guest_addr: 0,
+                        host_addr: guest_memory.get_host_address(GuestAddress(0)).unwrap() as u64,
+                        size: 0x8000_0000,
+                        measured: false,
+                    },
+                    MeasuredRegion {
+                        guest_addr: arch::FIRMWARE_START,
+                        host_addr: guest_memory
+                            .get_host_address(GuestAddress(arch::FIRMWARE_START))
+                            .unwrap() as u64,
+                        size: qboot_size,
+                        measured: true,
+                    },
+                ],
+                0u64,
+            )
+        }
     };
 
     let mut serial_devices = Vec::new();
@@ -861,7 +939,8 @@ pub fn build_microvm(
         for vcpu in &vcpus {
             vcpu.tdx_secure_virt_prepare(&mut tdx_launcher);
         }
-        vm.tdx_secure_virt_init_vcpus(&mut tdx_launcher).unwrap();
+        vm.tdx_secure_virt_init_vcpus(&mut tdx_launcher, tdvf_hob_address)
+            .unwrap();
     }
 
     // On aarch64, the vCPUs need to be created (i.e call KVM_CREATE_VCPU) and configured before
@@ -1541,7 +1620,7 @@ pub fn create_guest_memory(
 > {
     let mem_size = mem_size << 20;
 
-    let (firmware_data, firmware_size) = if let Some(firmware) = &vm_resources.firmware_config {
+    let (_firmware_data, firmware_size) = if let Some(firmware) = &vm_resources.firmware_config {
         let data = std::fs::read(firmware.path.clone()).map_err(StartMicrovmError::FirmwareRead)?;
         let len = data.len();
         (Some(data), Some(len))
@@ -1677,9 +1756,11 @@ pub fn create_guest_memory(
         load_payload(vm_resources, guest_mem, &arch_mem_info, payload)?;
 
     // Only write firmware if data exists AND this isn't an ExternalKernel payload
-    // (ExternalKernel does direct kernel boot and doesn't use EFI firmware)
+    // (ExternalKernel does direct kernel boot and doesn't use EFI firmware).
+    // For TDX, firmware is loaded per-section in build_microvm() via TDVF metadata.
+    #[cfg(not(feature = "tdx"))]
     if !matches!(payload, Payload::ExternalKernel(_)) {
-        if let Some(firmware_data) = firmware_data.as_ref() {
+        if let Some(firmware_data) = _firmware_data.as_ref() {
             guest_mem
                 .write(firmware_data, GuestAddress(arch_mem_info.firmware_addr))
                 .map_err(StartMicrovmError::FirmwareInvalidAddress)?;

@@ -70,6 +70,14 @@ pub enum Error {
     WriteMem(vm_memory::GuestMemoryError),
 }
 
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Error::WriteMem(e) => write!(f, "Failed to write HOB to guest memory: {e}"),
+        }
+    }
+}
+
 type Result<T> = std::result::Result<T, Error>;
 
 pub fn build_hobs(

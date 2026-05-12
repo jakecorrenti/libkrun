@@ -5,5 +5,4 @@ pub mod amdsnp;
 pub mod inteltdx;
 
 #[cfg(feature = "tdx")]
-#[allow(dead_code)]
 pub mod tdvf_hob;

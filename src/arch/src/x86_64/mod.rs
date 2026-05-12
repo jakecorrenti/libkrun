@@ -206,10 +206,7 @@ pub fn arch_memory_regions(
                     0,
                     ram_last_addr,
                     shm_start_addr,
-                    vec![
-                        (GuestAddress(0), size),
-                        (GuestAddress(fw_start), fw_size),
-                    ],
+                    vec![(GuestAddress(0), size), (GuestAddress(fw_start), fw_size)],
                 )
             }
             // case2: guest memory extends beyond the gap
