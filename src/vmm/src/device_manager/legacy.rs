@@ -142,6 +142,20 @@ impl PortIODeviceManager {
         self.io_bus
             .insert(self.i8042.clone(), 0x060, 0x5)
             .map_err(Error::BusError)?;
+        self.io_bus
+            .insert(
+                Arc::new(Mutex::new(devices::legacy::PciConfigSpace::new())),
+                0xCF8,
+                0x8,
+            )
+            .map_err(Error::BusError)?;
+        self.io_bus
+            .insert(
+                Arc::new(Mutex::new(devices::legacy::AcpiPmTimer::new())),
+                0xB000,
+                0x10,
+            )
+            .map_err(Error::BusError)?;
         Ok(())
     }
 }
