@@ -177,7 +177,7 @@ pub fn arch_memory_regions(
     kernel_load_addr: Option<u64>,
     kernel_size: usize,
     _initrd_size: u64,
-    _firmware_size: Option<usize>,
+    firmware_size: Option<usize>,
 ) -> (ArchMemoryInfo, Vec<(GuestAddress, usize)>) {
     let page_size: usize = unsafe { libc::sysconf(libc::_SC_PAGESIZE).try_into().unwrap() };
 
@@ -187,6 +187,11 @@ pub fn arch_memory_regions(
             panic!("Kernel doesn't fit in RAM");
         }
     }
+
+    let (fw_start, fw_size) = match firmware_size {
+        Some(size) => (FIRST_ADDR_PAST_32BITS - size as u64, size),
+        None => (FIRMWARE_START, FIRMWARE_SIZE as usize),
+    };
 
     // It's safe to cast MMIO_MEM_START to usize because it fits in a u32 variable
     // (It points to an address in the 32 bit space).
@@ -203,7 +208,7 @@ pub fn arch_memory_regions(
                     shm_start_addr,
                     vec![
                         (GuestAddress(0), size),
-                        (GuestAddress(FIRMWARE_START), FIRMWARE_SIZE as usize),
+                        (GuestAddress(fw_start), fw_size),
                     ],
                 )
             }
@@ -218,7 +223,7 @@ pub fn arch_memory_regions(
                     shm_start_addr,
                     vec![
                         (GuestAddress(0), MMIO_MEM_START as usize),
-                        (GuestAddress(FIRMWARE_START), FIRMWARE_SIZE as usize),
+                        (GuestAddress(fw_start), fw_size),
                         (GuestAddress(FIRST_ADDR_PAST_32BITS), remaining),
                     ],
                 )
@@ -231,7 +236,7 @@ pub fn arch_memory_regions(
         shm_start_addr,
         page_size,
         initrd_addr: layout::INITRD_SEV_START,
-        firmware_addr: 0,
+        firmware_addr: fw_start,
     };
     (info, regions)
 }
