@@ -1627,7 +1627,43 @@ fn load_payload(
                 None,
             ))
         }
-        Payload::Firmware => Ok((guest_mem, GuestAddress(arch::RESET_VECTOR), None, None)),
+        Payload::Firmware => {
+            #[cfg(feature = "tee")]
+            if let Some(kernel_bundle) = &_vm_resources.kernel_bundle {
+                let kernel_data = unsafe {
+                    std::slice::from_raw_parts(
+                        kernel_bundle.host_addr as *mut u8,
+                        kernel_bundle.size,
+                    )
+                };
+                guest_mem
+                    .write(kernel_data, GuestAddress(kernel_bundle.guest_addr))
+                    .unwrap();
+
+                if let Some(initrd_bundle) = &_vm_resources.initrd_bundle {
+                    let initrd_data = unsafe {
+                        std::slice::from_raw_parts(
+                            initrd_bundle.host_addr as *mut u8,
+                            initrd_bundle.size,
+                        )
+                    };
+                    guest_mem
+                        .write(initrd_data, GuestAddress(_arch_mem_info.initrd_addr))
+                        .unwrap();
+                    let initrd_config = InitrdConfig {
+                        address: GuestAddress(_arch_mem_info.initrd_addr),
+                        size: initrd_data.len(),
+                    };
+                    return Ok((
+                        guest_mem,
+                        GuestAddress(arch::RESET_VECTOR),
+                        Some(initrd_config),
+                        None,
+                    ));
+                }
+            }
+            Ok((guest_mem, GuestAddress(arch::RESET_VECTOR), None, None))
+        }
     }
 }
 
