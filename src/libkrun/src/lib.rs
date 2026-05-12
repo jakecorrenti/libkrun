@@ -2049,6 +2049,20 @@ pub extern "C" fn krun_split_irqchip(ctx_id: u32, enable: bool) -> i32 {
     }
 }
 
+#[cfg(feature = "tee")]
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+pub extern "C" fn krun_enable_acpi(ctx_id: u32) -> i32 {
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            let cfg = ctx_cfg.get_mut();
+            cfg.vmr.acpi_enabled = true;
+            KRUN_SUCCESS
+        }
+        Entry::Vacant(_) => -libc::ENOENT,
+    }
+}
+
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
 pub unsafe extern "C" fn krun_set_smbios_oem_strings(

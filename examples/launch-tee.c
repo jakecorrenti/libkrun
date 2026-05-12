@@ -126,6 +126,12 @@ int main(int argc, char *const argv[])
             perror("Error setting firmware path");
             return -1;
         }
+
+        if (err = krun_enable_acpi(ctx_id)) {
+            errno = -err;
+            perror("Error enabling ACPI tables");
+            return -1;
+        }
     }
 
     if (err = krun_split_irqchip(ctx_id, true)) {

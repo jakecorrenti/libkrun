@@ -1166,6 +1166,23 @@ int32_t krun_get_max_vcpus(void);
 */
 int32_t krun_split_irqchip(uint32_t ctx_id, bool enable);
 
+/**
+ * Enable ACPI table generation for TEE builds.
+ *
+ * When enabled, the VMM writes RSDP, XSDT, FADT, MADT, and DSDT tables
+ * into guest memory so that edk2-based firmware (e.g. TDVF) can discover
+ * CPU topology and interrupt routing.
+ *
+ * Only available in TEE builds (amd-sev, tdx).
+ *
+ * Arguments:
+ *  "ctx_id" - the configuration context ID.
+ *
+ * Returns:
+ *  Zero on success or a negative error number on failure.
+ */
+int32_t krun_enable_acpi(uint32_t ctx_id);
+
 /*
  * Do not create an implicit console device in the guest. By using this API,
  * libkrun will create zero console devices on behalf of the user. Any
