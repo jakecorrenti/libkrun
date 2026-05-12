@@ -200,6 +200,9 @@ pub struct VmResources {
     pub nested_enabled: bool,
     /// Whether to enable split irqchip
     pub split_irqchip: bool,
+    /// Whether to enable ACPI tables
+    #[cfg(feature = "tee")]
+    pub acpi_enabled: bool,
     /// Do not create an implicit console device in the guest
     pub disable_implicit_console: bool,
     /// The console id to use for console= in the kernel cmdline

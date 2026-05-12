@@ -1193,11 +1193,22 @@ pub fn build_microvm(
     #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
     load_cmdline(&vmm)?;
 
+    let _acpi_enabled = {
+        #[cfg(feature = "tee")]
+        {
+            vm_resources.acpi_enabled
+        }
+        #[cfg(not(feature = "tee"))]
+        {
+            false
+        }
+    };
     vmm.configure_system(
         vcpus.as_slice(),
         &intc,
         &payload_config.initrd_config,
         &vm_resources.smbios_oem_strings,
+        _acpi_enabled,
     )
     .map_err(StartMicrovmError::Internal)?;
 
