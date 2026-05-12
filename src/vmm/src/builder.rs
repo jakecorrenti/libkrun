@@ -754,17 +754,19 @@ pub fn build_microvm(
             let hob_address = hob_section.memory_address;
             let hob_size = hob_section.memory_data_size;
 
-            let mut regions = vec![MeasuredRegion {
-                guest_addr: 0,
-                host_addr: guest_memory.get_host_address(GuestAddress(0)).unwrap() as u64,
-                size: arch_memory_info.ram_below_gap as usize,
-                measured: false,
-            }];
+            let mut regions = Vec::new();
+            let ram_end = arch_memory_info.ram_below_gap;
+
+            let mut fw_ranges_in_ram: Vec<(u64, u64)> = Vec::new();
             for section in &sections {
                 let guest_addr = section.memory_address;
                 let data_size = section.memory_data_size as usize;
                 if data_size == 0 {
                     continue;
+                }
+
+                if guest_addr < ram_end {
+                    fw_ranges_in_ram.push((guest_addr, guest_addr + data_size as u64));
                 }
 
                 if section.raw_data_size > 0 {
@@ -787,6 +789,29 @@ pub fn build_microvm(
                         .unwrap() as u64,
                     size: data_size,
                     measured: section.attributes & 1 != 0,
+                });
+            }
+
+            fw_ranges_in_ram.sort_by_key(|r| r.0);
+            let mut cursor = 0u64;
+            for (start, end) in &fw_ranges_in_ram {
+                if *start > cursor {
+                    regions.push(MeasuredRegion {
+                        guest_addr: cursor,
+                        host_addr: guest_memory.get_host_address(GuestAddress(cursor)).unwrap()
+                            as u64,
+                        size: (*start - cursor) as usize,
+                        measured: false,
+                    });
+                }
+                cursor = *end;
+            }
+            if cursor < ram_end {
+                regions.push(MeasuredRegion {
+                    guest_addr: cursor,
+                    host_addr: guest_memory.get_host_address(GuestAddress(cursor)).unwrap() as u64,
+                    size: (ram_end - cursor) as usize,
+                    measured: false,
                 });
             }
 
