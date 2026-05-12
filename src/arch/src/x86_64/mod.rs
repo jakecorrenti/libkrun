@@ -427,21 +427,48 @@ mod tests {
         let (arch_mem_info, arch_mem_regions) =
             arch_memory_regions(mem_size, Some(KERNEL_LOAD_ADDR), KERNEL_SIZE, 0, None);
         let gm = GuestMemoryMmap::from_ranges(&arch_mem_regions).unwrap();
-        configure_system(&gm, &arch_mem_info, GuestAddress(0), 0, &None, no_vcpus, false).unwrap();
+        configure_system(
+            &gm,
+            &arch_mem_info,
+            GuestAddress(0),
+            0,
+            &None,
+            no_vcpus,
+            false,
+        )
+        .unwrap();
 
         // Now assigning some memory that is equal to the start of the 32bit memory hole.
         let mem_size = 3328 << 20;
         let (arch_mem_info, arch_mem_regions) =
             arch_memory_regions(mem_size, Some(KERNEL_LOAD_ADDR), KERNEL_SIZE, 0, None);
         let gm = GuestMemoryMmap::from_ranges(&arch_mem_regions).unwrap();
-        configure_system(&gm, &arch_mem_info, GuestAddress(0), 0, &None, no_vcpus, false).unwrap();
+        configure_system(
+            &gm,
+            &arch_mem_info,
+            GuestAddress(0),
+            0,
+            &None,
+            no_vcpus,
+            false,
+        )
+        .unwrap();
 
         // Now assigning some memory that falls after the 32bit memory hole.
         let mem_size = 3330 << 20;
         let (arch_mem_info, arch_mem_regions) =
             arch_memory_regions(mem_size, Some(KERNEL_LOAD_ADDR), KERNEL_SIZE, 0, None);
         let gm = GuestMemoryMmap::from_ranges(&arch_mem_regions).unwrap();
-        configure_system(&gm, &arch_mem_info, GuestAddress(0), 0, &None, no_vcpus, false).unwrap();
+        configure_system(
+            &gm,
+            &arch_mem_info,
+            GuestAddress(0),
+            0,
+            &None,
+            no_vcpus,
+            false,
+        )
+        .unwrap();
     }
 
     #[test]

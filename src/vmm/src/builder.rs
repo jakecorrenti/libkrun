@@ -680,7 +680,7 @@ pub fn build_microvm(
     };
 
     #[cfg(all(feature = "tee", not(feature = "tdx")))]
-    let measured_regions = {
+    let mut measured_regions = {
         println!("Injecting and measuring memory regions. This may take a while.");
 
         let qboot_size = if let Some(qboot_bundle) = &vm_resources.qboot_bundle {
@@ -736,7 +736,7 @@ pub fn build_microvm(
     };
 
     #[cfg(feature = "tdx")]
-    let (measured_regions, tdvf_hob_address) = {
+    let (mut measured_regions, tdvf_hob_address) = {
         println!("Injecting and measuring memory regions. This may take a while.");
         if let Some(firmware_config) = &vm_resources.firmware_config {
             use std::io::{Read, Seek, SeekFrom};
@@ -1211,6 +1211,19 @@ pub fn build_microvm(
         _acpi_enabled,
     )
     .map_err(StartMicrovmError::Internal)?;
+
+    #[cfg(feature = "tee")]
+    if vm_resources.acpi_enabled {
+        measured_regions.push(MeasuredRegion {
+            guest_addr: arch::x86_64::layout::ACPI_RSDP_ADDR,
+            host_addr: vmm
+                .guest_memory()
+                .get_host_address(GuestAddress(arch::x86_64::layout::ACPI_RSDP_ADDR))
+                .unwrap() as u64,
+            size: arch::x86_64::layout::ACPI_REGION_SIZE,
+            measured: true,
+        });
+    }
 
     #[cfg(feature = "tee")]
     {
