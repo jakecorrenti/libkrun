@@ -18,6 +18,7 @@ const FW_CFG_CMDLINE_SIZE: u16 = 0x0014;
 const FW_CFG_CMDLINE_DATA: u16 = 0x0015;
 const FW_CFG_KERNEL_SETUP_SIZE: u16 = 0x0017;
 const FW_CFG_KERNEL_SETUP_DATA: u16 = 0x0018;
+const FW_CFG_FILE_DIR: u16 = 0x0019;
 
 pub struct FwCfg {
     items: HashMap<u16, Vec<u8>>,
@@ -31,6 +32,8 @@ impl FwCfg {
 
         items.insert(FW_CFG_SIGNATURE, b"QEMU".to_vec());
         items.insert(FW_CFG_VERSION, 1u32.to_le_bytes().to_vec());
+        // Empty file directory: count=0 in big-endian
+        items.insert(FW_CFG_FILE_DIR, 0u32.to_be_bytes().to_vec());
 
         // bzImage: setup_sects at offset 0x1F1
         let setup_sects = kernel_data[0x1F1] as usize;
@@ -62,7 +65,7 @@ impl FwCfg {
         );
         items.insert(FW_CFG_CMDLINE_DATA, cmdline_bytes);
 
-        debug!(
+        eprintln!(
             "fw_cfg: kernel setup_size={setup_size} kernel_size={kernel_size} initrd_size={} cmdline_len={}",
             initrd_data.len(),
             cmdline.len()
@@ -80,6 +83,7 @@ impl BusDevice for FwCfg {
     fn read(&mut self, _vcpuid: u64, offset: u64, data: &mut [u8]) {
         match offset {
             DATA_OFFSET => {
+                let start_offset = self.data_offset;
                 for byte in data.iter_mut() {
                     *byte = self
                         .items
@@ -87,6 +91,13 @@ impl BusDevice for FwCfg {
                         .and_then(|item| item.get(self.data_offset).copied())
                         .unwrap_or(0);
                     self.data_offset += 1;
+                }
+                if start_offset == 0 {
+                    let item_len = self.items.get(&self.selector).map_or(0, |v| v.len());
+                    eprintln!(
+                        "fw_cfg: read item 0x{:04x} offset={start_offset} item_len={item_len}",
+                        self.selector
+                    );
                 }
             }
             _ => {
@@ -103,7 +114,11 @@ impl BusDevice for FwCfg {
             SELECTOR_OFFSET if data.len() >= 2 => {
                 self.selector = u16::from_le_bytes([data[0], data[1]]);
                 self.data_offset = 0;
-                debug!("fw_cfg: select item 0x{:04x}", self.selector);
+                let item_len = self.items.get(&self.selector).map_or(0, |v| v.len());
+                eprintln!(
+                    "fw_cfg: select item 0x{:04x} (item_len={item_len})",
+                    self.selector
+                );
             }
             _ => {
                 debug!(
