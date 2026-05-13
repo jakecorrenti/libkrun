@@ -2684,10 +2684,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         None => return -libc::ENOENT,
     };
 
-    if ctx_cfg.vmr.external_kernel.is_none()
-        && ctx_cfg.vmr.kernel_bundle.is_none()
-        && ctx_cfg.vmr.firmware_config.is_none()
-    {
+    if ctx_cfg.vmr.external_kernel.is_none() && ctx_cfg.vmr.kernel_bundle.is_none() {
         if let Some(ref krunfw) = ctx_cfg.krunfw {
             if let Err(err) = unsafe { load_krunfw_payload(krunfw, &mut ctx_cfg.vmr) } {
                 eprintln!("Can't load libkrunfw symbols: {err}");
