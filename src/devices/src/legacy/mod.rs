@@ -35,6 +35,8 @@ use x86_64::acpi_pm_timer;
 #[cfg(target_arch = "x86_64")]
 use x86_64::cmos;
 #[cfg(target_arch = "x86_64")]
+use x86_64::fw_cfg;
+#[cfg(target_arch = "x86_64")]
 use x86_64::pci_config;
 #[cfg(target_arch = "x86_64")]
 use x86_64::serial;
@@ -53,6 +55,8 @@ use riscv64::serial;
 pub use self::acpi_pm_timer::AcpiPmTimer;
 #[cfg(target_arch = "x86_64")]
 pub use self::cmos::Cmos;
+#[cfg(target_arch = "x86_64")]
+pub use self::fw_cfg::FwCfg;
 #[cfg(target_os = "macos")]
 pub use self::gicv3::GicV3;
 #[cfg(target_arch = "aarch64")]

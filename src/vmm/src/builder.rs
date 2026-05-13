@@ -1064,6 +1064,29 @@ pub fn build_microvm(
         setup_terminal_raw_mode(&mut vmm, Some(serial_tty), false);
     }
 
+    #[cfg(feature = "tee")]
+    if let (Some(kernel_bundle), Some(initrd_bundle)) = (
+        vm_resources.kernel_bundle.as_ref(),
+        vm_resources.initrd_bundle.as_ref(),
+    ) {
+        let kernel_data = unsafe {
+            std::slice::from_raw_parts(kernel_bundle.host_addr as *const u8, kernel_bundle.size)
+        };
+        let initrd_data = unsafe {
+            std::slice::from_raw_parts(initrd_bundle.host_addr as *const u8, initrd_bundle.size)
+        };
+        let fw_cfg =
+            devices::legacy::FwCfg::new(kernel_data, initrd_data, vmm.kernel_cmdline.as_str());
+        vmm.pio_device_manager
+            .io_bus
+            .insert(Arc::new(Mutex::new(fw_cfg)), 0x510, 0x02)
+            .map_err(|e| {
+                StartMicrovmError::Internal(Error::LegacyIOBus(
+                    crate::device_manager::legacy::Error::BusError(e),
+                ))
+            })?;
+    }
+
     #[cfg(not(feature = "tee"))]
     attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
     #[cfg(not(feature = "tee"))]
