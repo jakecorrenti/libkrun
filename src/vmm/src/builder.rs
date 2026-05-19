@@ -695,6 +695,7 @@ pub fn build_microvm(
                     .get_host_address(GuestAddress(arch::FIRMWARE_START))
                     .unwrap() as u64,
                 size: qboot_size,
+                attributes: 0,
             },
             MeasuredRegion {
                 guest_addr: kernel_guest_addr,
@@ -702,11 +703,13 @@ pub fn build_microvm(
                     .get_host_address(GuestAddress(kernel_guest_addr))
                     .unwrap() as u64,
                 size: kernel_size,
+                attributes: 0,
             },
             MeasuredRegion {
                 guest_addr: initrd_addr.0,
                 host_addr: guest_memory.get_host_address(initrd_addr).unwrap() as u64,
                 size: initrd_size,
+                attributes: 0,
             },
             MeasuredRegion {
                 guest_addr: arch::x86_64::layout::ZERO_PAGE_START,
@@ -714,6 +717,7 @@ pub fn build_microvm(
                     .get_host_address(GuestAddress(arch::x86_64::layout::ZERO_PAGE_START))
                     .unwrap() as u64,
                 size: 4096,
+                attributes: 0,
             },
         ]
     };
@@ -731,6 +735,7 @@ pub fn build_microvm(
                 guest_addr: 0,
                 host_addr: guest_memory.get_host_address(GuestAddress(0)).unwrap() as u64,
                 size: 0x8000_0000,
+                attributes: 0,
             },
             MeasuredRegion {
                 guest_addr: arch::FIRMWARE_START,
@@ -738,6 +743,7 @@ pub fn build_microvm(
                     .get_host_address(GuestAddress(arch::FIRMWARE_START))
                     .unwrap() as u64,
                 size: qboot_size,
+                attributes: 1,
             },
         ];
 
