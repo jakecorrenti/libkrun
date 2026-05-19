@@ -681,7 +681,7 @@ dependencies = [
  "linux-loader",
  "tdx",
  "vm-memory",
- "vmm-sys-util 0.15.0",
+ "vmm-sys-util",
  "windows-sys",
 ]
 
@@ -709,7 +709,7 @@ version = "0.1.0-2.0.0-dev"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
- "vmm-sys-util 0.15.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -741,7 +741,7 @@ dependencies = [
  "virtio-bindings",
  "vm-fdt",
  "vm-memory",
- "vmm-sys-util 0.15.0",
+ "vmm-sys-util",
  "windows-sys",
  "zerocopy",
 ]
@@ -839,7 +839,7 @@ dependencies = [
  "pkg-config",
  "remain",
  "thiserror 1.0.69",
- "vmm-sys-util 0.15.0",
+ "vmm-sys-util",
  "winapi",
  "zerocopy",
 ]
@@ -861,7 +861,7 @@ dependencies = [
  "libc",
  "log",
  "nix 0.30.1",
- "vmm-sys-util 0.15.0",
+ "vmm-sys-util",
  "windows-sys",
 ]
 
@@ -896,7 +896,7 @@ dependencies = [
  "serde_json",
  "tdx",
  "vm-memory",
- "vmm-sys-util 0.14.0",
+ "vmm-sys-util",
  "windows-sys",
  "zstd",
 ]
@@ -915,7 +915,7 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b3c06ff73c7ce03e780887ec2389d62d2a2a9ddf471ab05c2ff69207cd3f3b4"
 dependencies = [
- "vmm-sys-util 0.15.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -927,7 +927,7 @@ dependencies = [
  "bitflags 2.11.0",
  "kvm-bindings",
  "libc",
- "vmm-sys-util 0.15.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -1534,7 +1534,7 @@ dependencies = [
  "kvm-ioctls",
  "libc",
  "uuid",
- "vmm-sys-util 0.15.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -1675,7 +1675,7 @@ dependencies = [
  "libc",
  "uuid",
  "vm-memory",
- "vmm-sys-util 0.15.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -1705,16 +1705,6 @@ dependencies = [
  "libc",
  "thiserror 2.0.18",
  "winapi",
-]
-
-[[package]]
-name = "vmm-sys-util"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d21f366bf22bfba3e868349978766a965cbe628c323d58e026be80b8357ab789"
-dependencies = [
- "bitflags 1.3.2",
- "libc",
 ]
 
 [[package]]
