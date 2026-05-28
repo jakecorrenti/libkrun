@@ -223,6 +223,8 @@ fn setup_network() {
 struct Config {
     argv: Option<Vec<String>>,
     workdir: Option<String>,
+    #[cfg(target_os = "linux")]
+    tmpfs: Option<String>,
 }
 
 /// Parses env vars out of a JSON array value and calls `std::env::set_var`.
@@ -270,6 +272,38 @@ fn get_config_val<'a>(
         .map(|(_, v)| v)
 }
 
+/// Checks whether `path` is already listed as a mount point in `/proc/mounts`.
+/// Uses `/proc/mounts` rather than stat/lstat to avoid triggering Podman's
+/// automount mechanism, which would cause the host tmpfs to be mounted.
+#[cfg(target_os = "linux")]
+fn is_mount_point(path: &str) -> bool {
+    let Ok(mounts) = fs::read_to_string("/proc/mounts") else {
+        return false;
+    };
+    mounts.lines().any(|line| {
+        line.split_whitespace()
+            .nth(1)
+            .map_or(false, |mp| mp == path)
+    })
+}
+
+/// Parses the `mounts` JSON array and returns the destination path of the
+/// first tmpfs entry that is not already mounted.
+/// Mirrors `config_parse_mounts()` in init.c.
+#[cfg(target_os = "linux")]
+fn config_parse_mounts(arr: &serde_json::Value) -> Option<String> {
+    for entry in arr.as_array()? {
+        let obj = entry.as_object()?;
+        let destination = obj.get("destination").and_then(|v| v.as_str())?;
+        let fstype = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let source = obj.get("source").and_then(|v| v.as_str()).unwrap_or("");
+        if fstype == "tmpfs" && source == "tmpfs" && !is_mount_point(destination) {
+            return Some(destination.to_owned());
+        }
+    }
+    None
+}
+
 /// Reads, parses, and extracts fields from a krun JSON config file.
 ///
 /// Recognised top-level keys (all case-insensitive via serde_json's string matching):
@@ -312,7 +346,15 @@ fn parse_config(path: &str) -> Option<Config> {
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
 
-    Some(Config { argv, workdir })
+    #[cfg(target_os = "linux")]
+    let tmpfs = get_config_val(obj, &["mounts"]).and_then(config_parse_mounts);
+
+    Some(Config {
+        argv,
+        workdir,
+        #[cfg(target_os = "linux")]
+        tmpfs,
+    })
 }
 
 /// Resolves the config file path and parses it.
@@ -529,6 +571,17 @@ fn main() -> anyhow::Result<()> {
     let config = parse_config(&path).unwrap_or_default();
     #[cfg(target_os = "freebsd")]
     let config = load_config();
+
+    // Mount a tmpfs at the directory requested by the config (e.g. from Podman's
+    // --tmpfs). TODO: honour tmpcopyup and other mount flags from the config.
+    #[cfg(target_os = "linux")]
+    if let Some(ref path) = config.tmpfs {
+        let flags = MountFlags::NOEXEC | MountFlags::NOSUID | MountFlags::NODEV | MountFlags::RELATIME;
+        if let Err(e) = do_mount("tmpfs", path, "tmpfs", flags) {
+            eprintln!("mount for tmpfs: {e:#}");
+            process::exit(-1);
+        }
+    }
 
     // Lines 1345-1353: KRUN_HOME / KRUN_TERM override env vars.
     if let Ok(krun_home) = env::var("KRUN_HOME") {
