@@ -27,12 +27,16 @@ use rustix::stdio;
 #[cfg(target_os = "linux")]
 use rustix::system::{RebootCommand, reboot};
 
-use libc::{IFF_UP, ifreq};
+use libc::{AF_INET, IFF_UP, ifreq, sockaddr_in};
 
 const KRUN_REMOVE_ROOT_DIR_IOCTL: Opcode = 0x7603;
 const KRUN_EXIT_CODE_IOCTL: Opcode = 0x7602;
 const SIOCGIFFLAGS: Opcode = 0x8913;
 const SIOCSIFFLAGS: Opcode = 0x8914;
+#[cfg(target_os = "linux")]
+const SIOCSIFADDR: Opcode = 0x8916;
+#[cfg(target_os = "linux")]
+const SIOCSIFNETMASK: Opcode = 0x891c;
 
 #[cfg(all(feature = "tdx", feature = "sev"))]
 fn setup_root() -> anyhow::Result<()> {
@@ -215,6 +219,69 @@ fn setup_network() {
     if let Err(e) = dhcp::do_dhcp("eth0") {
         eprintln!("Warning: DHCP configuration for eth0 failed: {e}");
     }
+}
+
+/// Returns true if `tsi_hijack` appears in the kernel command line before any
+/// `--` delimiter. Mirrors `tsi_enabled()` in init.c.
+#[cfg(target_os = "linux")]
+fn tsi_enabled() -> bool {
+    let Ok(cmdline) = fs::read_to_string("/proc/cmdline") else {
+        return false;
+    };
+    cmdline
+        .split_whitespace()
+        .take_while(|tok| *tok != "--")
+        .any(|tok| tok == "tsi_hijack")
+}
+
+/// Brings up the `dummy0` interface and assigns it 10.0.0.1/8 so that
+/// applications probing for network availability see a configured interface
+/// when TSI is in use. Silently succeeds when the dummy driver is absent.
+/// Mirrors `enable_dummy_interface()` in init.c.
+#[cfg(target_os = "linux")]
+fn enable_dummy_interface() -> anyhow::Result<()> {
+    use std::net::Ipv4Addr;
+
+    let sock = net::socket(AddressFamily::INET, SocketType::DGRAM, None)
+        .context("dummy interface socket")?;
+
+    let mut ifr = ifreq_with_name(b"dummy0\0");
+
+    // Bring the interface up; silently succeed if the device doesn't exist.
+    ifr.ifr_ifru.ifru_flags = IFF_UP as libc::c_short;
+    let up_result = unsafe {
+        ioctl::ioctl(&sock, Updater::<SIOCSIFFLAGS, ifreq>::new(&mut ifr))
+    };
+    if let Err(e) = up_result {
+        if e == Errno::NODEV {
+            return Ok(());
+        }
+        return Err(e).context("dummy interface up");
+    }
+
+    // Set IP address to 10.0.0.1.
+    let addr_bytes = Ipv4Addr::new(10, 0, 0, 1).octets();
+    let mut sin: sockaddr_in = unsafe { mem::zeroed() };
+    sin.sin_family = AF_INET as libc::sa_family_t;
+    sin.sin_addr.s_addr = u32::from_ne_bytes(addr_bytes);
+    unsafe {
+        ifr.ifr_ifru.ifru_addr = mem::transmute(sin);
+        ioctl::ioctl(&sock, Updater::<SIOCSIFADDR, ifreq>::new(&mut ifr))
+            .context("dummy interface address")?;
+    }
+
+    // Set netmask to 255.0.0.0.
+    let mask_bytes = Ipv4Addr::new(255, 0, 0, 0).octets();
+    let mut sin: sockaddr_in = unsafe { mem::zeroed() };
+    sin.sin_family = AF_INET as libc::sa_family_t;
+    sin.sin_addr.s_addr = u32::from_ne_bytes(mask_bytes);
+    unsafe {
+        ifr.ifr_ifru.ifru_netmask = mem::transmute(sin);
+        ioctl::ioctl(&sock, Updater::<SIOCSIFNETMASK, ifreq>::new(&mut ifr))
+            .context("dummy interface mask")?;
+    }
+
+    Ok(())
 }
 
 /// Holds the parsed values produced by `config_parse_file`.
@@ -565,6 +632,13 @@ fn main() -> anyhow::Result<()> {
 
     #[cfg(target_os = "linux")]
     setup_network();
+
+    #[cfg(target_os = "linux")]
+    if tsi_enabled() {
+        if let Err(e) = enable_dummy_interface() {
+            eprintln!("Warning: Couldn't enable dummy interface: {e:#}");
+        }
+    }
 
     let path = env::var("KRUN_CONFIG").unwrap_or_else(|_| String::from("/.krun_config.json"));
     #[cfg(target_os = "linux")]
