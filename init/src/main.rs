@@ -29,7 +29,6 @@ use rustix::system::{RebootCommand, reboot};
 
 use libc::{AF_INET, IFF_UP, ifreq, sockaddr_in};
 
-const KRUN_REMOVE_ROOT_DIR_IOCTL: Opcode = 0x7603;
 const KRUN_EXIT_CODE_IOCTL: Opcode = 0x7602;
 const SIOCGIFFLAGS: Opcode = 0x8913;
 const SIOCSIFFLAGS: Opcode = 0x8914;
@@ -159,12 +158,6 @@ fn setup_block_root() -> anyhow::Result<()> {
 
         mount_block_device(&krun_root, newroot, &fstype, data)?;
         env::set_current_dir(newroot).context("chdir to {newroot}")?;
-
-        let fd =
-            rustix_fs::open("/", OFlags::RDONLY, Mode::empty()).context("opening / for ioctl")?;
-        if let Err(e) = unsafe { ioctl::ioctl(&fd, NoArg::<KRUN_REMOVE_ROOT_DIR_IOCTL>::new()) } {
-            eprintln!("Error removing temporary root directory: {e}");
-        }
 
         mount::mount_move(".", "/").context("mount_move . -> /")?;
         rustix_process::chroot(".").context("chroot .")?;
