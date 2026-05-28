@@ -24,6 +24,8 @@ use rustix::mount::{self, MountFlags, MountPropagationFlags};
 use rustix::net::{self, AddressFamily, SocketType};
 use rustix::process::{self as rustix_process, Pid, WaitOptions};
 use rustix::stdio;
+#[cfg(target_os = "linux")]
+use rustix::system::{RebootCommand, reboot};
 
 use libc::{IFF_UP, ifreq};
 
@@ -619,6 +621,10 @@ fn main() -> anyhow::Result<()> {
         };
 
         set_exit_code(code);
+
+        rustix_fs::sync();
+        #[cfg(target_os = "linux")]
+        let _ = reboot(RebootCommand::Restart);
     }
 
     Ok(())
