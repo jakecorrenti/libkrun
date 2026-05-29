@@ -5,20 +5,7 @@ LIBRARY_HEADER_INPUT = include/libkrun_input.h
 ABI_VERSION=1
 FULL_VERSION=1.18.0
 
-AWS_NITRO_INIT_SRC = \
-		init/aws-nitro/include/*        	  	\
-        init/aws-nitro/main.c				\
-        init/aws-nitro/archive.c				\
-        init/aws-nitro/args_reader.c			\
-        init/aws-nitro/fs.c				\
-        init/aws-nitro/mod.c					\
-		init/aws-nitro/device/include/*			\
-		init/aws-nitro/device/app_stdio_output.c	\
-		init/aws-nitro/device/device.c              \
-		init/aws-nitro/device/net_tap_afvsock.c	\
-		init/aws-nitro/device/signal.c		\
-
-AWS_NITRO_INIT_LD_FLAGS = -larchive -lnsm
+AWS_NITRO_INIT_RUST_SRC = $(shell find init/aws-nitro/src -name '*.rs' 2>/dev/null) init/aws-nitro/Cargo.toml
 
 ifeq ($(SEV),1)
     VARIANT = -sev
@@ -114,9 +101,10 @@ endif
 # Make the variable available to Rust build scripts.
 export CC_LINUX
 
-AWS_NITRO_INIT_BINARY= init/aws-nitro/init
-$(AWS_NITRO_INIT_BINARY): $(AWS_NITRO_INIT_SRC)
-	$(CC) -O2 -static -s -Wall $(AWS_NITRO_INIT_LD_FLAGS) -o $@ $(AWS_NITRO_INIT_SRC) $(AWS_NITRO_INIT_LD_FLAGS)
+AWS_NITRO_INIT_BINARY = init/aws-nitro/init
+$(AWS_NITRO_INIT_BINARY): $(AWS_NITRO_INIT_RUST_SRC)
+	cargo build --release --manifest-path init/aws-nitro/Cargo.toml --target x86_64-unknown-linux-musl
+	cp target/x86_64-unknown-linux-musl/release/krun-nitro-init $@
 
 ifeq ($(OS),Darwin)
 # macOS -> FreeBSD cross-compilation
