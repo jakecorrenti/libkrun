@@ -2,6 +2,7 @@
 
 mod archive;
 mod args;
+mod device;
 mod fs;
 mod modules;
 mod nsm;
