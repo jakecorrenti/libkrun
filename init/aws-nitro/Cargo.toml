@@ -1,0 +1,20 @@
+[workspace]
+
+[package]
+name = "krun-nitro-init"
+version = "0.1.0"
+edition = "2021"
+description = "PID-1 init binary for AWS Nitro Enclave guests"
+license = "Apache-2.0"
+repository = "https://github.com/containers/libkrun"
+
+[[bin]]
+name = "krun-nitro-init"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+aws-nitro-enclaves-nsm-api = "0.4"
+libc = "0.2"
+nix = { version = "0.30", features = ["fs", "ioctl", "mount", "poll", "process", "signal"] }
+tar = "0.4"
