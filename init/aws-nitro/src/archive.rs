@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::Context;
@@ -54,9 +56,6 @@ fn write_and_measure_entry<R: Read>(
     entry: &mut tar::Entry<R>,
     path: &Path,
 ) -> anyhow::Result<()> {
-    use std::fs::{self, File};
-    use std::os::unix::fs::PermissionsExt;
-
     let header = entry.header().clone();
 
     match header.entry_type() {
