@@ -4,7 +4,7 @@ use std::ffi::{CStr, CString};
 use std::fs::{self, File, Permissions};
 use std::io::{self, Write};
 use std::mem;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::ptr;
@@ -31,15 +31,6 @@ const TAP_NETMASK_NBO: u32 = 0xFFFF_FF00u32.to_be();
 const TAP_MAC: [u8; 6] = [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee];
 // Default gateway 172.31.10.83 in network byte order.
 const TAP_GATEWAY_NBO: u32 = 0xAC1F_0A53u32.to_be();
-
-/// RAII wrapper that closes a raw socket fd on drop.
-struct OwnedSock(libc::c_int);
-
-impl Drop for OwnedSock {
-    fn drop(&mut self) {
-        unsafe { libc::close(self.0) };
-    }
-}
 
 pub fn tap_afvsock_init(vsock_port: u32, shutdown_fd: RawFd) -> anyhow::Result<()> {
     tun_init().context("net: init /dev/net/tun")?;
@@ -125,11 +116,14 @@ fn make_sockaddr_in(ip_nbo: u32) -> libc::sockaddr_in {
 }
 
 fn tap_assign_ipaddr(name: &str) -> anyhow::Result<()> {
-    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
-    if sock < 0 {
-        return Err(io::Error::last_os_error()).context("socket for IP config");
-    }
-    let _guard = OwnedSock(sock);
+    let sock_fd = {
+        let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        if raw < 0 {
+            return Err(io::Error::last_os_error()).context("socket for IP config");
+        }
+        unsafe { OwnedFd::from_raw_fd(raw) }
+    };
+    let sock = sock_fd.as_raw_fd();
 
     // Set IP address.
     let mut ifr = ifreq_named(name);
@@ -197,11 +191,14 @@ fn tap_assign_ipaddr(name: &str) -> anyhow::Result<()> {
 }
 
 fn get_tap_mtu(tap_name: &str) -> anyhow::Result<u32> {
-    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
-    if sock < 0 {
-        return Err(io::Error::last_os_error()).context("socket for MTU");
-    }
-    let _guard = OwnedSock(sock);
+    let sock_fd = {
+        let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        if raw < 0 {
+            return Err(io::Error::last_os_error()).context("socket for MTU");
+        }
+        unsafe { OwnedFd::from_raw_fd(raw) }
+    };
+    let sock = sock_fd.as_raw_fd();
 
     let mut ifr = ifreq_named(tap_name);
     let ret = unsafe { libc::ioctl(sock, libc::SIOCGIFMTU, &mut ifr) };
