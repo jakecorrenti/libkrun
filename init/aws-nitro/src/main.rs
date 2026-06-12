@@ -9,7 +9,7 @@ mod mods;
 use std::ffi::CString;
 use std::io::{self, Read, Write};
 use std::mem;
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use anyhow::Context;
@@ -21,7 +21,7 @@ use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, Signal};
 use nix::sys::stat::Mode;
 use nix::sys::wait::{self, WaitStatus};
 use nix::unistd::{self, ForkResult};
-use vsock::{VsockAddr, VsockStream};
+use vsock::VsockStream;
 
 const VSOCK_PORT_OFFSET_ARGS_READER: u32 = 1;
 const VSOCK_PORT_OFFSET_NET: u32 = 2;
@@ -324,8 +324,12 @@ fn proxies_exit(args: &args_reader::EnclaveArgs, shutdown_fd: RawFd) -> anyhow::
 
 fn app_ret_write(code: i32, cid: u32) -> anyhow::Result<()> {
     let port = cid + VSOCK_PORT_OFFSET_APP_RET_CODE;
-    let mut stream = VsockStream::connect(&VsockAddr::new(VMADDR_CID_HOST, port))
-        .context("app_ret_write: connect")?;
+
+    // Create the socket, set a 5-second connect timeout, then connect.
+    // The host needs to join all device proxy threads before reading the return
+    // code; the timeout gives it time to do so (matching the C implementation).
+    let mut stream =
+        vsock_connect_with_timeout(VMADDR_CID_HOST, port, 5).context("app_ret_write: connect")?;
 
     stream
         .write_all(&code.to_ne_bytes())
@@ -337,4 +341,61 @@ fn app_ret_write(code: i32, cid: u32) -> anyhow::Result<()> {
         .context("app_ret_write: read ack")?;
 
     Ok(())
+}
+
+/// Open a vsock stream to (cid, port) with a connect timeout in seconds.
+///
+/// The vsock crate's `VsockStream::connect` does not expose `setsockopt`
+/// before connecting. We create the raw socket, set
+/// `SO_VM_SOCKETS_CONNECT_TIMEOUT`, and wrap the fd in a `VsockStream`.
+fn vsock_connect_with_timeout(
+    cid: u32,
+    port: u32,
+    timeout_secs: u64,
+) -> anyhow::Result<VsockStream> {
+    // SO_VM_SOCKETS_CONNECT_TIMEOUT = 6 (from linux/vm_sockets.h)
+    const SO_VM_SOCKETS_CONNECT_TIMEOUT: libc::c_int = 6;
+
+    let sock = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0) };
+    if sock < 0 {
+        return Err(io::Error::last_os_error()).context("vsock_connect_with_timeout: socket");
+    }
+
+    let timeval = libc::timeval {
+        tv_sec: timeout_secs as libc::time_t,
+        tv_usec: 0,
+    };
+    let ret = unsafe {
+        libc::setsockopt(
+            sock,
+            libc::AF_VSOCK,
+            SO_VM_SOCKETS_CONNECT_TIMEOUT,
+            &timeval as *const libc::timeval as *const libc::c_void,
+            mem::size_of::<libc::timeval>() as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        unsafe { libc::close(sock) };
+        return Err(io::Error::last_os_error())
+            .context("vsock_connect_with_timeout: setsockopt timeout");
+    }
+
+    let mut svm: libc::sockaddr_vm = unsafe { mem::zeroed() };
+    svm.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+    svm.svm_cid = cid;
+    svm.svm_port = port;
+    let ret = unsafe {
+        libc::connect(
+            sock,
+            &svm as *const libc::sockaddr_vm as *const libc::sockaddr,
+            mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        unsafe { libc::close(sock) };
+        return Err(io::Error::last_os_error()).context("vsock_connect_with_timeout: connect");
+    }
+
+    // SAFETY: sock is a valid connected AF_VSOCK SOCK_STREAM fd.
+    Ok(unsafe { VsockStream::from_raw_fd(sock) })
 }
