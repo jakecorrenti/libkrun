@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::fs::{self, File, Permissions};
+use std::io::{self, Write};
 use std::mem;
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::ptr;
+use std::slice;
 
 use anyhow::Context;
+use nix::fcntl::{OFlag, open};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::signal::{self, Signal};
+use nix::sys::stat::Mode;
 use nix::unistd::{self, ForkResult};
 use vsock::{VsockAddr, VsockStream};
 
@@ -18,14 +23,23 @@ const TUN_DEV_MAJOR: u32 = 10;
 const TUN_DEV_MINOR: u32 = 200;
 const ETH_HEADER_LEN: u32 = 14;
 
-// 172.31.10.83 as native-endian u32 for sin_addr.s_addr
-// sin_addr.s_addr is stored in network byte order (big-endian).
-const TAP_IP_BE: u32 = 0xAC1F_0A53u32.to_be();
-// 255.255.255.0 in network byte order
-const TAP_NETMASK_BE: u32 = 0xFFFF_FF00u32.to_be();
+// sin_addr.s_addr is stored in network byte order (NBO = big-endian on wire).
+// 172.31.10.83 in network byte order.
+const TAP_IP_NBO: u32 = 0xAC1F_0A53u32.to_be();
+// 255.255.255.0 in network byte order.
+const TAP_NETMASK_NBO: u32 = 0xFFFF_FF00u32.to_be();
 const TAP_MAC: [u8; 6] = [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee];
-// 172.31.10.83 as big-endian u32 = 0xAC1F0A53
-const TAP_GATEWAY_BE: u32 = 0xAC1F_0A53u32.to_be();
+// Default gateway 172.31.10.83 in network byte order.
+const TAP_GATEWAY_NBO: u32 = 0xAC1F_0A53u32.to_be();
+
+/// RAII wrapper that closes a raw socket fd on drop.
+struct OwnedSock(libc::c_int);
+
+impl Drop for OwnedSock {
+    fn drop(&mut self) {
+        unsafe { libc::close(self.0) };
+    }
+}
 
 pub fn tap_afvsock_init(vsock_port: u32, shutdown_fd: RawFd) -> anyhow::Result<()> {
     tun_init().context("net: init /dev/net/tun")?;
@@ -50,16 +64,13 @@ fn tun_init() -> anyhow::Result<()> {
         let dev = libc::makedev(TUN_DEV_MAJOR, TUN_DEV_MINOR);
         let ret = unsafe { libc::mknod(c"/dev/net/tun".as_ptr(), libc::S_IFCHR | 0o600, dev) };
         if ret < 0 {
-            return Err(std::io::Error::last_os_error()).context("mknod /dev/net/tun");
+            return Err(io::Error::last_os_error()).context("mknod /dev/net/tun");
         }
     }
     fs::set_permissions("/dev/net/tun", Permissions::from_mode(0o666)).context("chmod /dev/net/tun")
 }
 
 fn tap_alloc() -> anyhow::Result<(File, String)> {
-    use nix::fcntl::{OFlag, open};
-    use nix::sys::stat::Mode;
-
     let fd = open("/dev/net/tun", OFlag::O_RDWR, Mode::empty()).context("open /dev/net/tun")?;
     let raw = fd.as_raw_fd();
 
@@ -70,17 +81,17 @@ fn tap_alloc() -> anyhow::Result<(File, String)> {
     };
     let name = b"tap0\0";
     ifr.ifr_name[..name.len()].copy_from_slice(unsafe {
-        std::slice::from_raw_parts(name.as_ptr() as *const libc::c_char, name.len())
+        slice::from_raw_parts(name.as_ptr() as *const libc::c_char, name.len())
     });
 
     // TUNSETIFF = _IOW('T', 202, struct ifreq)
     let tunsetiff = nix::request_code_write!('T', 202, mem::size_of::<libc::ifreq>());
     if unsafe { libc::ioctl(raw, tunsetiff, &mut ifr) } < 0 {
-        return Err(std::io::Error::last_os_error()).context("TUNSETIFF");
+        return Err(io::Error::last_os_error()).context("TUNSETIFF");
     }
 
     let tap_name = unsafe {
-        std::ffi::CStr::from_ptr(ifr.ifr_name.as_ptr())
+        CStr::from_ptr(ifr.ifr_name.as_ptr())
             .to_string_lossy()
             .into_owned()
     };
@@ -97,7 +108,7 @@ fn ifreq_named(name: &str) -> libc::ifreq {
     let bytes = name.as_bytes();
     let len = bytes.len().min(libc::IFNAMSIZ - 1);
     unsafe {
-        std::ptr::copy_nonoverlapping(
+        ptr::copy_nonoverlapping(
             bytes.as_ptr() as *const libc::c_char,
             ifr.ifr_name.as_mut_ptr(),
             len,
@@ -106,46 +117,37 @@ fn ifreq_named(name: &str) -> libc::ifreq {
     ifr
 }
 
-fn make_sockaddr_in(ip_be: u32) -> libc::sockaddr_in {
+fn make_sockaddr_in(ip_nbo: u32) -> libc::sockaddr_in {
     let mut addr: libc::sockaddr_in = unsafe { mem::zeroed() };
     addr.sin_family = libc::AF_INET as u16;
-    addr.sin_addr.s_addr = ip_be;
+    addr.sin_addr.s_addr = ip_nbo;
     addr
 }
 
 fn tap_assign_ipaddr(name: &str) -> anyhow::Result<()> {
     let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
     if sock < 0 {
-        return Err(std::io::Error::last_os_error()).context("socket for IP config");
+        return Err(io::Error::last_os_error()).context("socket for IP config");
     }
-    // Always close the socket when done.
-    let _sock_guard = {
-        struct CloseFd(libc::c_int);
-        impl Drop for CloseFd {
-            fn drop(&mut self) {
-                unsafe { libc::close(self.0) };
-            }
-        }
-        CloseFd(sock)
-    };
+    let _guard = OwnedSock(sock);
 
     // Set IP address.
     let mut ifr = ifreq_named(name);
-    let addr_in = make_sockaddr_in(TAP_IP_BE);
+    let addr_in = make_sockaddr_in(TAP_IP_NBO);
     unsafe {
         ifr.ifr_ifru.ifru_addr = mem::transmute::<libc::sockaddr_in, libc::sockaddr>(addr_in);
         if libc::ioctl(sock, libc::SIOCSIFADDR, &ifr) < 0 {
-            return Err(std::io::Error::last_os_error()).context("SIOCSIFADDR");
+            return Err(io::Error::last_os_error()).context("SIOCSIFADDR");
         }
     }
 
     // Set netmask.
     let mut ifr = ifreq_named(name);
-    let mask_in = make_sockaddr_in(TAP_NETMASK_BE);
+    let mask_in = make_sockaddr_in(TAP_NETMASK_NBO);
     unsafe {
         ifr.ifr_ifru.ifru_netmask = mem::transmute::<libc::sockaddr_in, libc::sockaddr>(mask_in);
         if libc::ioctl(sock, libc::SIOCSIFNETMASK, &ifr) < 0 {
-            return Err(std::io::Error::last_os_error()).context("SIOCSIFNETMASK");
+            return Err(io::Error::last_os_error()).context("SIOCSIFNETMASK");
         }
     }
 
@@ -154,9 +156,9 @@ fn tap_assign_ipaddr(name: &str) -> anyhow::Result<()> {
     unsafe {
         ifr.ifr_ifru.ifru_hwaddr.sa_family = libc::ARPHRD_ETHER;
         let dst = ifr.ifr_ifru.ifru_hwaddr.sa_data.as_mut_ptr() as *mut u8;
-        std::ptr::copy_nonoverlapping(TAP_MAC.as_ptr(), dst, 6);
+        ptr::copy_nonoverlapping(TAP_MAC.as_ptr(), dst, 6);
         if libc::ioctl(sock, libc::SIOCSIFHWADDR, &ifr) < 0 {
-            return Err(std::io::Error::last_os_error()).context("SIOCSIFHWADDR");
+            return Err(io::Error::last_os_error()).context("SIOCSIFHWADDR");
         }
     }
 
@@ -164,17 +166,17 @@ fn tap_assign_ipaddr(name: &str) -> anyhow::Result<()> {
     let mut ifr = ifreq_named(name);
     unsafe {
         if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) < 0 {
-            return Err(std::io::Error::last_os_error()).context("SIOCGIFFLAGS");
+            return Err(io::Error::last_os_error()).context("SIOCGIFFLAGS");
         }
         ifr.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as i16;
         if libc::ioctl(sock, libc::SIOCSIFFLAGS, &ifr) < 0 {
-            return Err(std::io::Error::last_os_error()).context("SIOCSIFFLAGS");
+            return Err(io::Error::last_os_error()).context("SIOCSIFFLAGS");
         }
     }
 
     // Set default gateway.
     let mut route: libc::rtentry = unsafe { mem::zeroed() };
-    let gw = make_sockaddr_in(TAP_GATEWAY_BE);
+    let gw = make_sockaddr_in(TAP_GATEWAY_NBO);
     let dst = make_sockaddr_in(0);
     let mask = make_sockaddr_in(0);
     unsafe {
@@ -187,7 +189,7 @@ fn tap_assign_ipaddr(name: &str) -> anyhow::Result<()> {
     route.rt_dev = name_c.as_ptr() as *mut libc::c_char;
     unsafe {
         if libc::ioctl(sock, libc::SIOCADDRT, &route) < 0 {
-            return Err(std::io::Error::last_os_error()).context("SIOCADDRT");
+            return Err(io::Error::last_os_error()).context("SIOCADDRT");
         }
     }
 
@@ -197,8 +199,10 @@ fn tap_assign_ipaddr(name: &str) -> anyhow::Result<()> {
 fn get_tap_mtu(tap_name: &str) -> anyhow::Result<u32> {
     let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
     if sock < 0 {
-        return Err(std::io::Error::last_os_error()).context("socket for MTU");
+        return Err(io::Error::last_os_error()).context("socket for MTU");
     }
+    let _guard = OwnedSock(sock);
+
     let mut ifr = ifreq_named(tap_name);
     let ret = unsafe { libc::ioctl(sock, libc::SIOCGIFMTU, &mut ifr) };
     let mtu = if ret < 0 {
@@ -206,13 +210,10 @@ fn get_tap_mtu(tap_name: &str) -> anyhow::Result<u32> {
     } else {
         unsafe { ifr.ifr_ifru.ifru_mtu as u32 }
     };
-    unsafe { libc::close(sock) };
     Ok(mtu)
 }
 
 fn run_tap_proxy(tun_file: File, vsock: VsockStream, shutdown_fd: RawFd, tap_name: &str) -> ! {
-    use std::io::Write;
-
     let tun_fd = tun_file.as_raw_fd();
     let vsock_fd = vsock.as_raw_fd();
 
@@ -233,15 +234,12 @@ fn run_tap_proxy(tun_file: File, vsock: VsockStream, shutdown_fd: RawFd, tap_nam
 
     let poll_fds = &mut [
         PollFd::new(
-            unsafe { std::os::fd::BorrowedFd::borrow_raw(vsock_fd) },
+            unsafe { BorrowedFd::borrow_raw(vsock_fd) },
             PollFlags::POLLIN,
         ),
+        PollFd::new(unsafe { BorrowedFd::borrow_raw(tun_fd) }, PollFlags::POLLIN),
         PollFd::new(
-            unsafe { std::os::fd::BorrowedFd::borrow_raw(tun_fd) },
-            PollFlags::POLLIN,
-        ),
-        PollFd::new(
-            unsafe { std::os::fd::BorrowedFd::borrow_raw(shutdown_fd) },
+            unsafe { BorrowedFd::borrow_raw(shutdown_fd) },
             PollFlags::POLLIN,
         ),
     ];
@@ -254,56 +252,22 @@ fn run_tap_proxy(tun_file: File, vsock: VsockStream, shutdown_fd: RawFd, tap_nam
             Ok(_) => {}
         }
 
-        // vsock → TAP
         if poll_fds[0]
             .revents()
             .is_some_and(|r| r.contains(PollFlags::POLLIN))
+            && !forward_vsock_to_tap(vsock_fd, tun_fd, &mut buf, eth_frame_size)
         {
-            let mut len_buf = [0u8; 4];
-            if read_exact_raw(vsock_fd, &mut len_buf).is_err() {
-                break;
-            }
-            let len = u32::from_be_bytes(len_buf) as usize;
-            if len > eth_frame_size || read_exact_raw(vsock_fd, &mut buf[..len]).is_err() {
-                break;
-            }
-            // TAP requires a single atomic frame write; only retry on EINTR.
-            let written = loop {
-                let r = unsafe { libc::write(tun_fd, buf.as_ptr() as _, len) };
-                if r < 0 && nix::errno::Errno::last() == nix::errno::Errno::EINTR {
-                    continue;
-                }
-                break r;
-            };
-            if written != len as libc::ssize_t {
-                break;
-            }
+            break;
         }
 
-        // TAP → vsock
         if poll_fds[1]
             .revents()
             .is_some_and(|r| r.contains(PollFlags::POLLIN))
+            && !forward_tap_to_vsock(tun_fd, vsock_fd, &mut buf, eth_frame_size)
         {
-            let nread = loop {
-                let r = unsafe { libc::read(tun_fd, buf.as_mut_ptr() as _, eth_frame_size) };
-                if r < 0 && nix::errno::Errno::last() == nix::errno::Errno::EINTR {
-                    continue;
-                }
-                break r;
-            };
-            if nread <= 0 {
-                break;
-            }
-            let nread = nread as usize;
-            if write_exact_raw(vsock_fd, &(nread as u32).to_be_bytes()).is_err()
-                || write_exact_raw(vsock_fd, &buf[..nread]).is_err()
-            {
-                break;
-            }
+            break;
         }
 
-        // Shutdown
         if poll_fds[2]
             .revents()
             .is_some_and(|r| r.contains(PollFlags::POLLIN))
@@ -317,17 +281,58 @@ fn run_tap_proxy(tun_file: File, vsock: VsockStream, shutdown_fd: RawFd, tap_nam
     std::process::exit(0);
 }
 
-fn read_exact_raw(fd: RawFd, buf: &mut [u8]) -> std::io::Result<()> {
+/// Read one length-prefixed frame from `vsock_fd` and write it atomically to `tun_fd`.
+/// Returns `true` to continue the loop, `false` to break.
+fn forward_vsock_to_tap(vsock_fd: RawFd, tun_fd: RawFd, buf: &mut [u8], max: usize) -> bool {
+    let mut len_buf = [0u8; 4];
+    if read_exact_raw(vsock_fd, &mut len_buf).is_err() {
+        return false;
+    }
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > max || read_exact_raw(vsock_fd, &mut buf[..len]).is_err() {
+        return false;
+    }
+    // TAP requires a single atomic frame write; only retry on EINTR.
+    let written = loop {
+        let r = unsafe { libc::write(tun_fd, buf.as_ptr() as _, len) };
+        if r < 0 && nix::errno::Errno::last() == nix::errno::Errno::EINTR {
+            continue;
+        }
+        break r;
+    };
+    written == len as libc::ssize_t
+}
+
+/// Read one frame from `tun_fd` and write it length-prefixed to `vsock_fd`.
+/// Returns `true` to continue the loop, `false` to break.
+fn forward_tap_to_vsock(tun_fd: RawFd, vsock_fd: RawFd, buf: &mut [u8], max: usize) -> bool {
+    // TAP reads deliver one complete frame at a time; only retry on EINTR.
+    let nread = loop {
+        let r = unsafe { libc::read(tun_fd, buf.as_mut_ptr() as _, max) };
+        if r < 0 && nix::errno::Errno::last() == nix::errno::Errno::EINTR {
+            continue;
+        }
+        break r;
+    };
+    if nread <= 0 {
+        return false;
+    }
+    let nread = nread as usize;
+    write_exact_raw(vsock_fd, &(nread as u32).to_be_bytes()).is_ok()
+        && write_exact_raw(vsock_fd, &buf[..nread]).is_ok()
+}
+
+fn read_exact_raw(fd: RawFd, buf: &mut [u8]) -> io::Result<()> {
     let mut total = 0;
     while total < buf.len() {
         let n = unsafe { libc::read(fd, buf[total..].as_mut_ptr() as _, buf.len() - total) };
         match n {
-            0 => return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
+            0 => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
             n if n < 0 => {
                 if nix::errno::Errno::last() == nix::errno::Errno::EINTR {
                     continue;
                 }
-                return Err(std::io::Error::last_os_error());
+                return Err(io::Error::last_os_error());
             }
             n => total += n as usize,
         }
@@ -335,7 +340,7 @@ fn read_exact_raw(fd: RawFd, buf: &mut [u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn write_exact_raw(fd: RawFd, buf: &[u8]) -> std::io::Result<()> {
+fn write_exact_raw(fd: RawFd, buf: &[u8]) -> io::Result<()> {
     let mut total = 0;
     while total < buf.len() {
         let n = unsafe { libc::write(fd, buf[total..].as_ptr() as _, buf.len() - total) };
@@ -343,7 +348,7 @@ fn write_exact_raw(fd: RawFd, buf: &[u8]) -> std::io::Result<()> {
             if nix::errno::Errno::last() == nix::errno::Errno::EINTR {
                 continue;
             }
-            return Err(std::io::Error::last_os_error());
+            return Err(io::Error::last_os_error());
         }
         total += n as usize;
     }

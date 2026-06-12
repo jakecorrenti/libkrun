@@ -37,6 +37,15 @@ const VMADDR_CID_HOST: u32 = 2;
 static APP_PID: AtomicI32 = AtomicI32::new(-1);
 static SIGTERM_CAUGHT: AtomicBool = AtomicBool::new(false);
 
+/// RAII wrapper that closes the NSM device fd on drop.
+struct NsmGuard(i32);
+
+impl Drop for NsmGuard {
+    fn drop(&mut self) {
+        nsm_exit(self.0);
+    }
+}
+
 extern "C" fn shutdown_sig_handler(sig: libc::c_int) {
     if sig == libc::SIGTERM {
         let pid = APP_PID.load(Ordering::Relaxed);
@@ -72,14 +81,6 @@ fn main() -> anyhow::Result<()> {
     let nsm_fd = nsm_init();
     if nsm_fd < 0 {
         anyhow::bail!("unable to open NSM guest module");
-    }
-
-    // Ensure NSM fd is closed on any error exit path.
-    struct NsmGuard(i32);
-    impl Drop for NsmGuard {
-        fn drop(&mut self) {
-            nsm_exit(self.0);
-        }
     }
     let _nsm_guard = NsmGuard(nsm_fd);
 
@@ -220,33 +221,18 @@ fn extend_str(nsm_fd: i32, s: &str) -> anyhow::Result<()> {
 }
 
 fn nsm_lock_pcr(nsm_fd: i32) -> anyhow::Result<()> {
-    // Lock PCR 16 (rootfs measurement) so no further data can be measured into it.
-    let response = nsm_process_request(
-        nsm_fd,
-        Request::LockPCR {
-            index: NSM_PCR_ROOTFS,
-        },
-    );
-    match response {
-        Response::LockPCR => {}
-        Response::Error(e) => anyhow::bail!("NSM LockPCR PCR16 failed: {e:?}"),
-        other => anyhow::bail!("NSM LockPCR PCR16 unexpected: {other:?}"),
-    }
+    // Lock PCR 16 (rootfs) and PCR 17 (exec env) so neither can be extended further.
+    lock_one_pcr(nsm_fd, NSM_PCR_ROOTFS).context("NSM LockPCR PCR16")?;
+    lock_one_pcr(nsm_fd, NSM_PCR_EXEC_DATA).context("NSM LockPCR PCR17")
+}
 
-    // Lock PCR 17 (exec env measurement) so no further data can be measured into it.
-    let response = nsm_process_request(
-        nsm_fd,
-        Request::LockPCR {
-            index: NSM_PCR_EXEC_DATA,
-        },
-    );
+fn lock_one_pcr(nsm_fd: i32, index: u16) -> anyhow::Result<()> {
+    let response = nsm_process_request(nsm_fd, Request::LockPCR { index });
     match response {
-        Response::LockPCR => {}
-        Response::Error(e) => anyhow::bail!("NSM LockPCR PCR17 failed: {e:?}"),
-        other => anyhow::bail!("NSM LockPCR PCR17 unexpected: {other:?}"),
+        Response::LockPCR => Ok(()),
+        Response::Error(e) => anyhow::bail!("NSM LockPCR failed: {e:?}"),
+        other => anyhow::bail!("NSM LockPCR unexpected response: {other:?}"),
     }
-
-    Ok(())
 }
 
 fn cid_fetch() -> anyhow::Result<u32> {
