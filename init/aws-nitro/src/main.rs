@@ -48,12 +48,10 @@ extern "C" fn shutdown_sig_handler(sig: libc::c_int) {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Block SIGTERM and SIGUSR1 during setup.
-    let mut setup_sigset = SigSet::empty();
-    setup_sigset.add(Signal::SIGTERM);
-    setup_sigset.add(Signal::SIGUSR1);
-    signal::sigprocmask(signal::SigmaskHow::SIG_BLOCK, Some(&setup_sigset), None)
-        .context("sigprocmask block")?;
+    // Block all signals during setup, matching the C implementation's sigfillset.
+    let all_signals = SigSet::all();
+    signal::sigprocmask(signal::SigmaskHow::SIG_BLOCK, Some(&all_signals), None)
+        .context("sigprocmask block all")?;
 
     // Install SIGUSR1 handler for device proxy ready notification.
     let sigusr1_action = SigAction::new(
@@ -104,8 +102,8 @@ fn main() -> anyhow::Result<()> {
 
     proxies_init(cid, &args, shutdown_fd).context("proxies_init")?;
 
-    // Unblock SIGTERM and SIGUSR1 before forking the application.
-    signal::sigprocmask(signal::SigmaskHow::SIG_UNBLOCK, Some(&setup_sigset), None)
+    // Unblock all signals before forking the application.
+    signal::sigprocmask(signal::SigmaskHow::SIG_UNBLOCK, Some(&all_signals), None)
         .context("sigprocmask unblock")?;
 
     let child_pid = match unsafe { unistd::fork() }.context("fork application")? {
@@ -304,18 +302,22 @@ fn proxies_init(
 
 fn proxies_exit(args: &args_reader::EnclaveArgs, shutdown_fd: RawFd) -> anyhow::Result<()> {
     let val: u64 = 1;
-    let ret = unsafe {
+    let write_ret = unsafe {
         libc::write(
             shutdown_fd,
             &val as *const u64 as *const libc::c_void,
             mem::size_of::<u64>(),
         )
     };
-    if ret < 0 {
-        return Err(io::Error::last_os_error()).context("proxies_exit: write shutdown_fd");
-    }
+
+    // Always close the stdio output vsock, even if the shutdown write failed.
+    // The C implementation does this unconditionally.
     if args.app_output {
         device::stdio::output_close();
+    }
+
+    if write_ret < 0 {
+        return Err(io::Error::last_os_error()).context("proxies_exit: write shutdown_fd");
     }
     Ok(())
 }
