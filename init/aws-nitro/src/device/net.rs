@@ -130,7 +130,7 @@ fn tap_assign_ipaddr(name: &str) -> anyhow::Result<()> {
     let addr_in = make_sockaddr_in(TAP_IP_NBO);
     unsafe {
         ifr.ifr_ifru.ifru_addr = mem::transmute::<libc::sockaddr_in, libc::sockaddr>(addr_in);
-        if libc::ioctl(sock, libc::SIOCSIFADDR, &ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCSIFADDR as _, &ifr) < 0 {
             return Err(io::Error::last_os_error()).context("SIOCSIFADDR");
         }
     }
@@ -140,7 +140,7 @@ fn tap_assign_ipaddr(name: &str) -> anyhow::Result<()> {
     let mask_in = make_sockaddr_in(TAP_NETMASK_NBO);
     unsafe {
         ifr.ifr_ifru.ifru_netmask = mem::transmute::<libc::sockaddr_in, libc::sockaddr>(mask_in);
-        if libc::ioctl(sock, libc::SIOCSIFNETMASK, &ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCSIFNETMASK as _, &ifr) < 0 {
             return Err(io::Error::last_os_error()).context("SIOCSIFNETMASK");
         }
     }
@@ -151,7 +151,7 @@ fn tap_assign_ipaddr(name: &str) -> anyhow::Result<()> {
         ifr.ifr_ifru.ifru_hwaddr.sa_family = libc::ARPHRD_ETHER;
         let dst = ifr.ifr_ifru.ifru_hwaddr.sa_data.as_mut_ptr() as *mut u8;
         ptr::copy_nonoverlapping(TAP_MAC.as_ptr(), dst, 6);
-        if libc::ioctl(sock, libc::SIOCSIFHWADDR, &ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCSIFHWADDR as _, &ifr) < 0 {
             return Err(io::Error::last_os_error()).context("SIOCSIFHWADDR");
         }
     }
@@ -159,11 +159,11 @@ fn tap_assign_ipaddr(name: &str) -> anyhow::Result<()> {
     // Set flags UP + RUNNING.
     let mut ifr = ifreq_named(name);
     unsafe {
-        if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut ifr) < 0 {
             return Err(io::Error::last_os_error()).context("SIOCGIFFLAGS");
         }
         ifr.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as i16;
-        if libc::ioctl(sock, libc::SIOCSIFFLAGS, &ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr) < 0 {
             return Err(io::Error::last_os_error()).context("SIOCSIFFLAGS");
         }
     }
@@ -182,7 +182,7 @@ fn tap_assign_ipaddr(name: &str) -> anyhow::Result<()> {
     let name_c = CString::new(name).unwrap();
     route.rt_dev = name_c.as_ptr() as *mut libc::c_char;
     unsafe {
-        if libc::ioctl(sock, libc::SIOCADDRT, &route) < 0 {
+        if libc::ioctl(sock, libc::SIOCADDRT as _, &route) < 0 {
             return Err(io::Error::last_os_error()).context("SIOCADDRT");
         }
     }
@@ -201,7 +201,7 @@ fn get_tap_mtu(tap_name: &str) -> anyhow::Result<u32> {
     let sock = sock_fd.as_raw_fd();
 
     let mut ifr = ifreq_named(tap_name);
-    let ret = unsafe { libc::ioctl(sock, libc::SIOCGIFMTU, &mut ifr) };
+    let ret = unsafe { libc::ioctl(sock, libc::SIOCGIFMTU as _, &mut ifr) };
     let mtu = if ret < 0 {
         1500 // fallback
     } else {
