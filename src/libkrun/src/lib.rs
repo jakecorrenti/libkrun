@@ -585,7 +585,7 @@ pub unsafe extern "C" fn krun_add_virtiofs2(
 
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+#[cfg(not(feature = "tee"))]
 pub unsafe extern "C" fn krun_add_virtiofs3(
     ctx_id: u32,
     c_tag: *const c_char,
@@ -625,18 +625,21 @@ pub unsafe extern "C" fn krun_add_virtiofs3(
         match CTX_MAP.lock().unwrap().entry(ctx_id) {
             Entry::Occupied(mut ctx_cfg) => {
                 let cfg = ctx_cfg.get_mut();
-                #[allow(unused_mut)]
-                let mut virtual_entries = Vec::new();
-                #[cfg(feature = "init-blob")]
-                if tag == "/dev/root" && !cfg.disable_implicit_init {
-                    virtual_entries.push(init_virtual_entry());
-                }
                 cfg.vmr.add_fs_device(FsDeviceConfig {
                     fs_id: tag.to_string(),
                     shared_dir: path.map(|p| p.to_string()),
                     shm_size: shm,
                     read_only,
-                    virtual_entries,
+                    #[cfg(not(feature = "aws-nitro"))]
+                    virtual_entries: {
+                        #[allow(unused_mut)]
+                        let mut v = Vec::new();
+                        #[cfg(feature = "init-blob")]
+                        if tag == "/dev/root" && !cfg.disable_implicit_init {
+                            v.push(init_virtual_entry());
+                        }
+                        v
+                    },
                 });
             }
             Entry::Vacant(_) => return -libc::ENOENT,
