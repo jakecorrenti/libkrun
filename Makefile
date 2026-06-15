@@ -116,10 +116,12 @@ endif
 # Make the variable available to Rust build scripts.
 export CC_LINUX
 
+ifeq ($(AWS_NITRO),1)
 AWS_NITRO_INIT_BINARY= init/aws-nitro/init
 $(AWS_NITRO_INIT_BINARY): init/aws-nitro/Cargo.toml $(shell find init/aws-nitro/src -name '*.rs' 2>/dev/null)
-	cargo build --release --manifest-path init/aws-nitro/Cargo.toml
-	cp init/aws-nitro/target/release/krun-init-awsnitro $@
+	cargo build --release --target $(ARCH)-unknown-linux-musl --manifest-path init/aws-nitro/Cargo.toml
+	cp init/aws-nitro/target/$(ARCH)-unknown-linux-musl/release/krun-init-awsnitro $@
+endif
 
 ifeq ($(OS),Darwin)
 # macOS -> FreeBSD cross-compilation
@@ -222,7 +224,7 @@ clean-sysroot:
 	rm -rf $(FREEBSD_ROOTFS_DIR)
 
 
-$(LIBRARY_RELEASE_$(OS)): $(SYSROOT_TARGET) $(INIT_BINARY_BSD)
+$(LIBRARY_RELEASE_$(OS)): $(SYSROOT_TARGET) $(INIT_BINARY_BSD) $(AWS_NITRO_INIT_BINARY)
 	cargo build --release $(FEATURE_FLAGS)
 ifeq ($(SEV),1)
 	mv target/release/libkrun.so target/release/$(KRUN_BASE_$(OS))
