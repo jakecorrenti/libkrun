@@ -8,6 +8,8 @@ use std::os::unix::io::AsRawFd;
 
 #[cfg(feature = "blk")]
 use imago::io_buffers::{IoVector, IoVectorMut};
+#[cfg(feature = "blk")]
+use std::io::{IoSlice, IoSliceMut};
 use vm_memory::VolatileSlice;
 
 use libc::{c_int, c_void, read, readv, size_t, write, writev};
@@ -427,7 +429,19 @@ impl FileReadWriteAtVolatile for DiskProperties {
             return Ok(0);
         }
 
-        let (iovec, _guard) = IoVectorMut::from_volatile_slice(bufs);
+        let guards: Vec<_> = bufs.iter().map(|s| s.ptr_guard_mut()).collect();
+        let slices: Vec<_> = guards
+            .iter()
+            .map(|g| {
+                let slice = if g.len() == 0 {
+                    &mut []
+                } else {
+                    unsafe { std::slice::from_raw_parts_mut(g.as_ptr(), g.len()) }
+                };
+                IoSliceMut::new(slice)
+            })
+            .collect();
+        let iovec = IoVectorMut::from(slices);
         let full_length = iovec
             .len()
             .try_into()
@@ -445,7 +459,19 @@ impl FileReadWriteAtVolatile for DiskProperties {
             return Ok(0);
         }
 
-        let (iovec, _guard) = IoVector::from_volatile_slice(bufs);
+        let guards: Vec<_> = bufs.iter().map(|s| s.ptr_guard()).collect();
+        let slices: Vec<_> = guards
+            .iter()
+            .map(|g| {
+                let slice = if g.len() == 0 {
+                    &[]
+                } else {
+                    unsafe { std::slice::from_raw_parts(g.as_ptr(), g.len()) }
+                };
+                IoSlice::new(slice)
+            })
+            .collect();
+        let iovec = IoVector::from(slices);
         let full_length = iovec
             .len()
             .try_into()
