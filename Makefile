@@ -119,6 +119,7 @@ export CC_LINUX
 ifeq ($(AWS_NITRO),1)
 AWS_NITRO_INIT_BINARY= init/aws-nitro/init
 $(AWS_NITRO_INIT_BINARY): init/aws-nitro/Cargo.toml $(shell find init/aws-nitro/src -name '*.rs' 2>/dev/null)
+	RUSTFLAGS="-C target-feature=+crt-static" \
 	cargo build --release --target $(ARCH)-unknown-linux-musl --manifest-path init/aws-nitro/Cargo.toml
 	cp init/aws-nitro/target/$(ARCH)-unknown-linux-musl/release/krun-init-awsnitro $@
 endif
