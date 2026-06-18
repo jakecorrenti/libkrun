@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# Force static linking of the C runtime for musl targets so the init binary
+# has no dynamic-linker dependency (required for the enclave initramfs).
+# Also enable the musl v1.2.3+ API surface used by the libc crate.
+[target.'cfg(target_env = "musl")']
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "--cfg", "musl_v1_2_3",
+]
