@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io::{Read, Write};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
+use nix::errno::Errno;
 use vsock::{VsockAddr, VsockStream};
 
 const ENCLAVE_VSOCK_LAUNCH_ARGS_READY: u8 = 0xb7;
@@ -30,7 +33,27 @@ pub struct EnclaveArgs {
 /// and read all enclave arguments.
 pub fn read(vsock_port: u32) -> anyhow::Result<EnclaveArgs> {
     let addr = VsockAddr::new(VMADDR_CID_HOST, vsock_port);
-    let mut stream = VsockStream::connect(&addr).context("args_reader: vsock connect")?;
+
+    // The host may not have its vsock listener ready immediately after the
+    // enclave starts. On older kernels (e.g. 4.14), a connect to a port with
+    // no listener returns ECONNRESET rather than ECONNREFUSED. Retry for up
+    // to 10 seconds before giving up.
+    const MAX_RETRIES: u32 = 100;
+    let mut stream = {
+        let mut last_err = None;
+        let mut stream = None;
+        for _ in 0..MAX_RETRIES {
+            match VsockStream::connect(&addr) {
+                Ok(s) => { stream = Some(s); break; }
+                Err(e) if matches!(e.raw_os_error().map(Errno::from_raw), Some(Errno::ECONNRESET | Errno::ECONNREFUSED)) => {
+                    last_err = Some(e);
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(e) => return Err(e).context("args_reader: vsock connect"),
+            }
+        }
+        stream.ok_or_else(|| anyhow::anyhow!("args_reader: vsock connect: {}", last_err.unwrap()))?
+    };
 
     // Handshake: send ready byte and read it back.
     stream
