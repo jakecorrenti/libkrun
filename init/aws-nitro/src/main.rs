@@ -236,13 +236,23 @@ fn lock_one_pcr(nsm_fd: i32, index: u16) -> anyhow::Result<()> {
 }
 
 fn cid_fetch() -> anyhow::Result<u32> {
-    let fd =
-        open("/dev/vsock", OFlag::O_RDONLY, Mode::empty()).context("cid_fetch: open /dev/vsock")?;
-
-    let mut cid: u32 = 0;
     // IOCTL_VM_SOCKETS_GET_LOCAL_CID = _IOR(7, 0xb9, unsigned int)
     let ioctl_get_cid = nix::request_code_read!('\x07', 0xb9, mem::size_of::<u32>());
+    let mut cid: u32 = 0;
 
+    // Some kernels handle this ioctl on an AF_VSOCK socket rather than
+    // /dev/vsock. Try the socket approach first, fall back to /dev/vsock.
+    let sock = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0) };
+    if sock >= 0 {
+        let ret = unsafe { libc::ioctl(sock, ioctl_get_cid, &mut cid) };
+        unsafe { libc::close(sock) };
+        if ret == 0 {
+            return Ok(cid);
+        }
+    }
+
+    let fd =
+        open("/dev/vsock", OFlag::O_RDONLY, Mode::empty()).context("cid_fetch: open /dev/vsock")?;
     let ret = unsafe { libc::ioctl(fd.as_raw_fd(), ioctl_get_cid, &mut cid) };
     if ret < 0 {
         return Err(io::Error::last_os_error()).context("cid_fetch: ioctl");
