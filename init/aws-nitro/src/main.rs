@@ -238,26 +238,36 @@ fn lock_one_pcr(nsm_fd: i32, index: u16) -> anyhow::Result<()> {
 fn cid_fetch() -> anyhow::Result<u32> {
     // IOCTL_VM_SOCKETS_GET_LOCAL_CID = _IOR(7, 0xb9, unsigned int)
     let ioctl_get_cid = nix::request_code_read!('\x07', 0xb9, mem::size_of::<u32>());
-    let mut cid: u32 = 0;
 
-    // Some kernels handle this ioctl on an AF_VSOCK socket rather than
-    // /dev/vsock. Try the socket approach first, fall back to /dev/vsock.
-    let sock = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0) };
-    if sock >= 0 {
-        let ret = unsafe { libc::ioctl(sock, ioctl_get_cid, &mut cid) };
-        unsafe { libc::close(sock) };
-        if ret == 0 {
-            return Ok(cid);
+    // The vsock transport may not be registered immediately after the kernel
+    // loads it — on Nitro the hypervisor sets up the device asynchronously
+    // after nsm.ko is probed. Retry for up to 10 seconds on EINVAL.
+    //
+    // Some kernels handle this ioctl on an AF_VSOCK socket; others require
+    // /dev/vsock. Try both on each iteration.
+    for _ in 0..100 {
+        let mut cid: u32 = 0;
+
+        let sock = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0) };
+        if sock >= 0 {
+            let ret = unsafe { libc::ioctl(sock, ioctl_get_cid, &mut cid) };
+            unsafe { libc::close(sock) };
+            if ret == 0 {
+                return Ok(cid);
+            }
         }
+
+        if let Ok(fd) = open("/dev/vsock", OFlag::O_RDONLY, Mode::empty()) {
+            let ret = unsafe { libc::ioctl(fd.as_raw_fd(), ioctl_get_cid, &mut cid) };
+            if ret == 0 {
+                return Ok(cid);
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    let fd =
-        open("/dev/vsock", OFlag::O_RDONLY, Mode::empty()).context("cid_fetch: open /dev/vsock")?;
-    let ret = unsafe { libc::ioctl(fd.as_raw_fd(), ioctl_get_cid, &mut cid) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error()).context("cid_fetch: ioctl");
-    }
-    Ok(cid)
+    Err(io::Error::from_raw_os_error(libc::EINVAL)).context("cid_fetch: vsock not ready after 10s")
 }
 
 fn proxies_init(
