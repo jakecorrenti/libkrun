@@ -20,7 +20,7 @@ members = [
     "src/rutabaga_gfx",
     "src/whp",
 ]
-exclude = ["examples/gtk_display"]
+exclude = ["examples/gtk_display", "init/aws-nitro"]
 resolver = "2"
 
 [profile.dev]
