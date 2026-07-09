@@ -119,5 +119,11 @@ fn main() -> anyhow::Result<()> {
     // Initialize early debug output with /dev/console.
     fs::console_init().context("unable to initialize /dev/console")?;
 
+    // Fetch the enclave VM's CID in order to calculate vsock port offsets for host communication.
+    let cid = vsock::get_local_cid().context("unable to get enclave VM's CID")?;
+    if cid == 0 {
+        return Ok(());
+    }
+
     Ok(())
 }
