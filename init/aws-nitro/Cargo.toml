@@ -14,4 +14,5 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.103"
-nix = { version = "0.31.3", features = ["fs", "mount", "signal"] }
+nix = { version = "0.31.3", features = ["fs", "ioctl", "mount", "signal"] }
+vsock = "0.5.4"
