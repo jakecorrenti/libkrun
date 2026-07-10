@@ -1,7 +1,10 @@
+mod args_reader;
 mod fs;
 mod kernel_mods;
 
 use anyhow::Context;
+
+const VSOCK_PORT_OFFSET_ARGS_READER: u32 = 1;
 
 fn main() -> anyhow::Result<()> {
     // Some linux modules, like virtio-mmio, may be required for console output. Load these modules
@@ -16,6 +19,9 @@ fn main() -> anyhow::Result<()> {
     if cid == 0 {
         return Ok(());
     }
+
+    // Read the enclave arguments from the host.
+    let _args = args_reader::read(cid + VSOCK_PORT_OFFSET_ARGS_READER)?;
 
     Ok(())
 }
