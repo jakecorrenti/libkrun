@@ -1,8 +1,9 @@
 mod args_reader;
 mod fs;
 mod kernel_mods;
+mod nsm;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 
 const VSOCK_PORT_OFFSET_ARGS_READER: u32 = 1;
 
@@ -21,7 +22,16 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Read the enclave arguments from the host.
-    let _args = args_reader::read(cid + VSOCK_PORT_OFFSET_ARGS_READER)?;
+    let args = args_reader::read(cid + VSOCK_PORT_OFFSET_ARGS_READER)?;
+
+    // Create a handle to the NSM.
+    let nsm_fd = aws_nitro_enclaves_nsm_api::driver::nsm_init();
+    if nsm_fd < 0 {
+        bail!("unable to open NSM guest module");
+    }
+
+    // Measure the rootfs and execution environment in the NSM PCRs.
+    nsm::pcr_extend_exec_path(nsm_fd, &args.exec_path, &args.exec_argv, &args.exec_envp)?;
 
     Ok(())
 }
