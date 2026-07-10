@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, bail};
 
 const VSOCK_PORT_OFFSET_ARGS_READER: u32 = 1;
 
@@ -267,6 +267,53 @@ mod args_reader {
     }
 }
 
+mod nsm {
+    use anyhow::bail;
+    use aws_nitro_enclaves_nsm_api::api::{Request, Response};
+    use aws_nitro_enclaves_nsm_api::driver as nitro_driver;
+
+    const NSM_PCR_EXEC_DATA: u16 = 17;
+
+    /// Measure the enclave execution environment {path, argv, envp} in NSM PCR 17.
+    ///
+    /// NSM PCR 17 contains the measurement of the execution environment (path,
+    /// argv, envp).
+    pub fn pcr_extend_exec_path(
+        nsm_fd: i32,
+        path: &str,
+        argv: &[String],
+        envp: &[String],
+    ) -> anyhow::Result<()> {
+        // Measure the execution path.
+        measure_exec_string(nsm_fd, path)?;
+
+        // Measure each execution argument.
+        for arg in argv {
+            measure_exec_string(nsm_fd, arg)?;
+        }
+
+        // Measure each environment variable.
+        for env in envp {
+            measure_exec_string(nsm_fd, env)?;
+        }
+
+        Ok(())
+    }
+
+    fn measure_exec_string(fd: i32, data: &str) -> anyhow::Result<()> {
+        let req = Request::ExtendPCR {
+            index: NSM_PCR_EXEC_DATA,
+            data: data.as_bytes().to_vec(),
+        };
+        let resp = nitro_driver::nsm_process_request(fd, req);
+        match resp {
+            Response::ExtendPCR { .. } => Ok(()),
+            Response::Error(e) => bail!("failure to extend PCR {}: {:?}", NSM_PCR_EXEC_DATA, e),
+            r => bail!("unexpected NSM response: {:?}", r),
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     // Some linux modules, like virtio-mmio, may be required for console output. Load these modules
     // immediately to ensure they are available to the initrd.
@@ -283,6 +330,15 @@ fn main() -> anyhow::Result<()> {
 
     // Read the enclave arguments from the host.
     let args = args_reader::read(cid + VSOCK_PORT_OFFSET_ARGS_READER)?;
+
+    // Create a handle to the NSM.
+    let nsm_fd = aws_nitro_enclaves_nsm_api::driver::nsm_init();
+    if nsm_fd < 0 {
+        bail!("unable to open NSM guest module");
+    }
+
+    // Measure the rootfs and execution environment in the NSM PCRs.
+    nsm::pcr_extend_exec_path(nsm_fd, &args.exec_path, &args.exec_argv, &args.exec_envp)?;
 
     Ok(())
 }
