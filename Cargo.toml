@@ -24,8 +24,6 @@ exclude = [
     "init/aws-nitro",
 ]
 resolver = "2"
-
-[profile.dev]
 #panic = "abort"
 
 [profile.release]

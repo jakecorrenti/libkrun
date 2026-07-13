@@ -1,3 +1,4 @@
+mod archive;
 mod args_reader;
 mod fs;
 mod kernel_mods;
@@ -32,6 +33,9 @@ fn main() -> anyhow::Result<()> {
 
     // Measure the rootfs and execution environment in the NSM PCRs.
     nsm::pcr_extend_exec_path(nsm_fd, &args.exec_path, &args.exec_argv, &args.exec_envp)?;
+
+    // Extract the rootfs from memory and write it to the enclave filesystem.
+    archive::extract(nsm_fd, &args.rootfs_archive)?;
 
     Ok(())
 }
