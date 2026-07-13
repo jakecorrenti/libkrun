@@ -334,6 +334,25 @@ mod nsm {
         }
         Ok(())
     }
+
+    /// Lock PCRs measured by init process and close the NSM handle.
+    pub fn lock_and_exit(nsm_fd: i32) -> anyhow::Result<()> {
+        // Lock PCRs 16 and 17 so they cannot be extended further. This is to ensure there can be
+        // no further data measured other than the rootfs and execution environment.
+        for index in [NSM_PCR_ROOTFS, NSM_PCR_EXEC_DATA] {
+            let req = Request::LockPCR { index };
+            let resp = nitro_driver::nsm_process_request(nsm_fd, req);
+            match resp {
+                Response::LockPCR => continue,
+                Response::Error(e) => bail!("failure to lock PCR {}: {:?}", index, e),
+                r => bail!("unexpected NSM response: {:?}", r),
+            }
+        }
+
+        // Close the NSM device handle.
+        nitro_driver::nsm_exit(nsm_fd);
+        Ok(())
+    }
 }
 
 mod archive {
@@ -405,6 +424,9 @@ fn main() -> anyhow::Result<()> {
 
     // Extract the rootfs from memory and write it to the enclave filesystem.
     archive::extract(nsm_fd, &args.rootfs_archive)?;
+
+    // Lock NSM PCRs 16 and 17 and close NSM handle.
+    nsm::lock_and_exit(nsm_fd)?;
 
     Ok(())
 }
