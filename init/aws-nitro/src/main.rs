@@ -40,5 +40,8 @@ fn main() -> anyhow::Result<()> {
     // Lock NSM PCRs 16 and 17 and close NSM handle.
     nsm::lock_and_exit(nsm_fd)?;
 
+    // Mount the root filesystem
+    fs::mount_rootfs()?;
+
     Ok(())
 }

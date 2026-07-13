@@ -39,3 +39,23 @@ pub fn console_init() -> anyhow::Result<()> {
     unistd::dup2_stdout(console_w).context("unable to redirect stdout")?;
     unistd::dup2_stderr(console_w).context("unable to redirect stderr")
 }
+
+/// Mount the extracted rootfs and switch the root directory to it.
+pub fn mount_rootfs() -> anyhow::Result<()> {
+    mount::mount(
+        Some("/rootfs"),
+        "/rootfs",
+        None::<&str>,
+        MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .context("unable to mount /rootfs with mount()")?;
+    unistd::chdir("/rootfs").context("unable to change current dir to /rootfs")?;
+
+    mount::mount(Some("."), "/", None::<&str>, MsFlags::MS_MOVE, None::<&str>)
+        .context("unable to move . to / with mount()")?;
+    unistd::chroot(".").context("unable to change root to . ")?;
+    unistd::chdir("/").context("unable to change dir to /")?;
+
+    Ok(())
+}
