@@ -43,5 +43,8 @@ fn main() -> anyhow::Result<()> {
     // Mount the root filesystem
     fs::mount_rootfs()?;
 
+    // Initialize the rest of the filesystem.
+    fs::init_filesystem()?;
+
     Ok(())
 }
