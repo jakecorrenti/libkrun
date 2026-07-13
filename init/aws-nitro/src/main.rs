@@ -37,5 +37,8 @@ fn main() -> anyhow::Result<()> {
     // Extract the rootfs from memory and write it to the enclave filesystem.
     archive::extract(nsm_fd, &args.rootfs_archive)?;
 
+    // Lock NSM PCRs 16 and 17 and close NSM handle.
+    nsm::lock_and_exit(nsm_fd)?;
+
     Ok(())
 }
