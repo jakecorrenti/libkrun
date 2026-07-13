@@ -46,5 +46,8 @@ fn main() -> anyhow::Result<()> {
     // Initialize the rest of the filesystem.
     fs::init_filesystem()?;
 
+    // Initialize the cgroups.
+    fs::init_cgroups()?;
+
     Ok(())
 }
