@@ -4,6 +4,7 @@ const VSOCK_PORT_OFFSET_ARGS_READER: u32 = 1;
 
 mod fs {
     use std::fs::OpenOptions;
+    use std::io::{BufRead, BufReader};
     use std::os::{fd::AsFd, unix::fs as unix_fs};
 
     use anyhow::Context;
@@ -182,6 +183,57 @@ mod fs {
             Some("mode=0755"),
         )
         .context("unable to mount /sys/fs/cgroup")?;
+
+        Ok(())
+    }
+
+    /// Initialize the cgroups.
+    pub fn init_cgroups() -> anyhow::Result<()> {
+        let f = OpenOptions::new()
+            .read(true)
+            .open("/proc/cgroups")
+            .context("unable to open /proc/cgroups")?;
+
+        let buf_reader = BufReader::new(f);
+        let mut lines = buf_reader.lines();
+
+        // Skip the first line.
+        lines.next();
+
+        for line in lines {
+            let line = line.context("unable to read line of /proc/cgroups")?;
+            let sysfs_path = "/sys/fs/cgroup/";
+
+            // Cgroup lines have the following format: subsys_name | hierarchy | num_cgroups | enabled
+            let mut line = line.split_whitespace();
+            let subsys_name = match line.next() {
+                Some(l) => l,
+                None => continue,
+            };
+
+            // Skip hierarchy and num_cgroups
+            let mut line = line.skip(2);
+
+            let enabled = match line.next() {
+                Some(l) => l.parse().unwrap_or(0),
+                None => continue,
+            };
+
+            let path = format!("{}{}", sysfs_path, subsys_name);
+
+            if enabled > 0 {
+                unistd::mkdir(path.as_str(), Mode::from_bits_truncate(0o755))
+                    .context(format!("unable to mkdir {}", path))?;
+                mount::mount(
+                    Some(subsys_name),
+                    path.as_str(),
+                    Some("cgroup"),
+                    MsFlags::MS_NODEV | MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
+                    Some(subsys_name),
+                )
+                .context(format!("unable to mount {}", path))?;
+            }
+        }
 
         Ok(())
     }
@@ -574,6 +626,9 @@ fn main() -> anyhow::Result<()> {
 
     // Initialize the rest of the filesystem.
     fs::init_filesystem()?;
+
+    // Initialize the cgroups.
+    fs::init_cgroups()?;
 
     Ok(())
 }
