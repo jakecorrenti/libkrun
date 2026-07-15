@@ -603,6 +603,7 @@ mod proxy {
     use nix::errno::Errno;
     use nix::libc as nix_c;
     use nix::poll::{PollFd, PollFlags, PollTimeout};
+    use nix::sys::signal::{self, Signal};
     use nix::sys::socket::{self, AddressFamily, SockFlag, SockType};
     use nix::sys::stat::{self, Mode, SFlag};
     use nix::unistd::{self, ForkResult};
@@ -610,6 +611,7 @@ mod proxy {
 
     const VSOCK_PORT_OFFSET_NET: u32 = 2;
     const VSOCK_PORT_OFFSET_OUTPUT: u32 = 3;
+    const VSOCK_PORT_OFFSET_SIGNAL_HANDLER: u32 = 5;
 
     const TUN_DEV_MAJOR: u64 = 10;
     const TUN_DEV_MINOR: u64 = 200;
@@ -1005,6 +1007,85 @@ mod proxy {
         Ok(())
     }
 
+    /// Initialize a sign handling proxy to forward signals from the host to the parent process.
+    fn init_signal_handler_proxy(
+        readp: &OwnedFd,
+        writep: &OwnedFd,
+        shutdown_write: &OwnedFd,
+        shutdown_read: &OwnedFd,
+        vsock_port: u32,
+    ) -> anyhow::Result<()> {
+        match unsafe { unistd::fork()? } {
+            ForkResult::Parent { .. } => {
+                let mut buf = [0u8; 1];
+                if let Err(e) = unistd::read(readp, &mut buf) {
+                    bail!(
+                        "error waiting for signal handler proxy to report ready state: {}",
+                        e
+                    );
+                }
+                // We can continue onward with execution and not wait for the
+                // child to finish
+            }
+            ForkResult::Child => {
+                unistd::close(shutdown_write.as_raw_fd())
+                    .context("unable to close shutdown write pipe")?;
+
+                let addr = VsockAddr::new(VMADDR_CID_HOST, vsock_port);
+                let mut stream =
+                    VsockStream::connect(&addr).context("unable to connect to host")?;
+                stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+                let stream_borrowed_fd = unsafe { BorrowedFd::borrow_raw(stream.as_raw_fd()) };
+                let shutdown_read_borrowed_fd =
+                    unsafe { BorrowedFd::borrow_raw(shutdown_read.as_raw_fd()) };
+
+                let mut pfds = [
+                    PollFd::new(stream_borrowed_fd, PollFlags::POLLIN),
+                    PollFd::new(shutdown_read_borrowed_fd, PollFlags::POLLIN),
+                ];
+
+                // Signal to the parent process that initialization is complete.
+                unistd::write(writep, &[1]).context("unable to write signal handler readiness")?;
+
+                loop {
+                    let nready = nix::poll::poll(&mut pfds, PollTimeout::NONE)
+                        .context("unable to poll fds")?;
+                    if nready == 0 {
+                        continue;
+                    }
+
+                    // Event on vsock. Read the signal and forward it to the parent process.
+                    if let Some(vsock_event) = pfds[0].revents()
+                        && vsock_event == PollFlags::POLLIN
+                    {
+                        let mut sig = [0u8; 4];
+                        match stream.read_exact(&mut sig) {
+                            Ok(()) => {
+                                let sig_int = i32::from_ne_bytes(sig);
+                                let sig = Signal::try_from(sig_int).unwrap_or(Signal::SIGTERM);
+                                signal::kill(unistd::getppid(), sig)
+                                    .context(format!("unable to send {} to parent process", sig))?;
+                            }
+                            Err(_) => signal::kill(unistd::getppid(), Signal::SIGTERM)
+                                .context("unable to send SIGTERM to parent process")?,
+                        }
+                    }
+
+                    // Event on shutdown FD. Close the vsock and exit.
+                    if let Some(shutdown_event) = pfds[1].revents()
+                        && shutdown_event == PollFlags::POLLIN
+                    {
+                        break;
+                    }
+                }
+                std::process::exit(0);
+            }
+        }
+        Ok(())
+    }
+
     pub fn init(cid: u32, args: &super::args_reader::EnclaveArgs) -> anyhow::Result<()> {
         let (readp, writep) = nix::unistd::pipe().context("unable to create readiness pipe")?;
         let (shutdown_read, shutdown_write) =
@@ -1027,6 +1108,15 @@ mod proxy {
                 cid + VSOCK_PORT_OFFSET_NET,
             )?;
         }
+
+        // The signal proxy is always initialized to allow the host to send signals to the enclave.
+        init_signal_handler_proxy(
+            &readp,
+            &writep,
+            &shutdown_write,
+            &shutdown_read,
+            cid + VSOCK_PORT_OFFSET_SIGNAL_HANDLER,
+        )?;
 
         Ok(())
     }
