@@ -1,4 +1,9 @@
+use std::ffi::CString;
+use std::str::FromStr;
+
 use anyhow::{Context, bail};
+use nix::libc as nix_c;
+use nix::unistd::{self, ForkResult};
 
 const VSOCK_PORT_OFFSET_ARGS_READER: u32 = 1;
 
@@ -1122,6 +1127,33 @@ mod proxy {
     }
 }
 
+/// Launch the application specified with argv and envp.
+fn launch(argv: Vec<String>, envp: Vec<String>) -> anyhow::Result<()> {
+    // Create a new session and set the process group ID.
+    let _ = unistd::setsid().context("unable to set sid")?;
+
+    let argv_cstr: Vec<CString> = argv
+        .iter()
+        .map(|s| CString::new(s.trim_end_matches('\0')).unwrap())
+        .collect();
+
+    let envp_cstr: Vec<CString> = envp
+        .iter()
+        .map(|s| CString::new(s.trim_end_matches('\0')).unwrap())
+        .collect();
+
+    // Add the envp to the environment variables.
+    let env0 = CString::new(envp[0].as_str()).context("unable to create CStr from envp[0]")?;
+    let ret = unsafe { nix_c::putenv(env0.into_raw()) };
+    if ret < 0 {
+        bail!("unable to initialize default path environment");
+    }
+
+    unistd::execvpe(&argv_cstr[0], &argv_cstr, &envp_cstr).context("unable to call execvpe")?;
+
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     // Some linux modules, like virtio-mmio, may be required for console output. Load these modules
     // immediately to ensure they are available to the initrd.
@@ -1165,6 +1197,17 @@ fn main() -> anyhow::Result<()> {
 
     // Initialize each configured device proxy.
     proxy::init(cid, &args)?;
+
+    match unsafe { unistd::fork()? } {
+        ForkResult::Parent { child } => {
+            // Initialize the shutdown handler for signals to be forwarded to the application
+            // process.
+        }
+        ForkResult::Child => {
+            // Execute the enclave application.
+            launch(args.exec_argv, args.exec_envp)?;
+        }
+    }
 
     Ok(())
 }
