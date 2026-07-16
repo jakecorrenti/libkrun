@@ -5,6 +5,7 @@ mod kernel_mods;
 mod nsm;
 mod proxy;
 
+use std::ffi::CString;
 use std::mem::size_of;
 use std::os::fd::AsRawFd;
 
@@ -12,6 +13,7 @@ use anyhow::{Context, bail};
 use nix::errno::Errno;
 use nix::libc as nix_c;
 use nix::sys::socket::{self, AddressFamily, SockFlag, SockType};
+use nix::unistd::{self, ForkResult};
 use vsock::{VMADDR_CID_HOST, VsockAddr, VsockStream};
 
 const VSOCK_PORT_OFFSET_ARGS_READER: u32 = 1;
@@ -43,6 +45,33 @@ fn connect_host(port: u32) -> anyhow::Result<VsockStream> {
     socket::connect(socket.as_raw_fd(), &VsockAddr::new(VMADDR_CID_HOST, port))
         .context("unable to connect to host vsock")?;
     Ok(VsockStream::from(socket))
+}
+
+/// Launch the application specified with argv and envp.
+fn launch(argv: Vec<String>, envp: Vec<String>) -> anyhow::Result<()> {
+    // Create a new session and set the process group ID.
+    let _ = unistd::setsid().context("unable to set sid")?;
+
+    let argv_cstr: Vec<CString> = argv
+        .iter()
+        .map(|s| CString::new(s.trim_end_matches('\0')).unwrap())
+        .collect();
+
+    let envp_cstr: Vec<CString> = envp
+        .iter()
+        .map(|s| CString::new(s.trim_end_matches('\0')).unwrap())
+        .collect();
+
+    // Add the envp to the environment variables.
+    let env0 = CString::new(envp[0].as_str()).context("unable to create CStr from envp[0]")?;
+    let ret = unsafe { nix_c::putenv(env0.into_raw()) };
+    if ret < 0 {
+        bail!("unable to initialize default path environment");
+    }
+
+    unistd::execvpe(&argv_cstr[0], &argv_cstr, &envp_cstr).context("unable to call execvpe")?;
+
+    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -88,6 +117,17 @@ fn main() -> anyhow::Result<()> {
 
     // Initialize each configured device proxy.
     proxy::init(cid, &args)?;
+
+    match unsafe { unistd::fork()? } {
+        ForkResult::Parent { .. } => {
+            // Initialize the shutdown handler for signals to be forwarded to the application
+            // process.
+        }
+        ForkResult::Child => {
+            // Execute the enclave application.
+            launch(args.exec_argv, args.exec_envp)?;
+        }
+    }
 
     Ok(())
 }
