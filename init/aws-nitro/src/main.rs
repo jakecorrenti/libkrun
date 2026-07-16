@@ -6,17 +6,24 @@ mod nsm;
 mod proxy;
 
 use std::ffi::CString;
+use std::io::{Read, Write};
 use std::mem::size_of;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use nix::errno::Errno;
 use nix::libc as nix_c;
+use nix::sys::signal;
 use nix::sys::socket::{self, AddressFamily, SockFlag, SockType};
+use nix::sys::wait::{self, WaitStatus};
 use nix::unistd::{self, ForkResult};
+use signal_hook::consts::SIGTERM;
+use signal_hook::iterator::Signals;
 use vsock::{VMADDR_CID_HOST, VsockAddr, VsockStream};
 
 const VSOCK_PORT_OFFSET_ARGS_READER: u32 = 1;
+const VSOCK_PORT_OFFSET_APP_RET_CODE: u32 = 4;
 const SO_VM_SOCKETS_CONNECT_TIMEOUT: nix_c::c_int = 6;
 
 fn connect_host(port: u32) -> anyhow::Result<VsockStream> {
@@ -74,6 +81,52 @@ fn launch(argv: Vec<String>, envp: Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Dereference and close the application output vsock.
+fn close_app_output() -> anyhow::Result<()> {
+    unistd::close(nix_c::STDOUT_FILENO).context("unable to close STDOUT fd")?;
+    unistd::close(nix_c::STDERR_FILENO).context("unable to close STDERR fd")?;
+    Ok(())
+}
+
+/// CLose and exit each device proxy.
+fn exit_proxies(output_enabled: bool, shutdown_write: &OwnedFd) -> anyhow::Result<()> {
+    // The shutdown value is irrelevant, it acts as a signal to all device proxy
+    // threads that the enclave is exiting. Upon receiving this signal, each
+    // device proxy will close their respective vsock and exit.
+    unistd::write(shutdown_write, &[1]).context("unable to write to shutdown pipe")?;
+
+    // If not in debug mode, close the application output vsock.
+    if output_enabled {
+        close_app_output()?;
+    }
+
+    Ok(())
+}
+
+/// Forward the application return code to the host.
+fn write_app_ret(code: i32, cid: u32) -> anyhow::Result<()> {
+    let vsock_port = cid + VSOCK_PORT_OFFSET_APP_RET_CODE;
+    // The host needs to join all device proxy threads before reading the return code. Allow some
+    // time for the host to connect to the return code vsock.
+    let mut stream = connect_host(vsock_port)?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+    // Write the return code.
+    stream
+        .write_all(&code.to_ne_bytes())
+        .context("unable to write return code to host")?;
+
+    // Read a return code (value is irrelevant) from the host. This is to ensure that the host was
+    // able to read the return code from the vsock before the enclave exits.
+    let mut read_code_buf = [0u8; 4];
+    stream
+        .read_exact(&mut read_code_buf)
+        .context("unable to read return code confirmation from host")?;
+
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     // Some linux modules, like virtio-mmio, may be required for console output. Load these modules
     // immediately to ensure they are available to the initrd.
@@ -115,15 +168,45 @@ fn main() -> anyhow::Result<()> {
     // Initialize the cgroups.
     fs::init_cgroups()?;
 
+    let (shutdown_readp, shutdown_writep) = unistd::pipe()?;
+
     // Initialize each configured device proxy.
-    proxy::init(cid, &args)?;
+    proxy::init(cid, &args, &shutdown_readp, &shutdown_writep)?;
 
     match unsafe { unistd::fork()? } {
-        ForkResult::Parent { .. } => {
+        ForkResult::Parent { child } => {
             // Initialize the shutdown handler for signals to be forwarded to the application
             // process.
+            let mut signals = Signals::new([SIGTERM])?;
+            std::thread::spawn(move || {
+                for signal in signals.forever() {
+                    if signal == SIGTERM {
+                        // Send the signal to the application process.
+                        let _ = signal::kill(child, signal::SIGTERM);
+                    }
+                }
+            });
+
+            // Wait for the application process to exit.
+            let code = match wait::waitpid(child, None)? {
+                // If the process was ended by a signal, the return code may
+                // represent a value that under normal circumstances would
+                // indicate an error. Therefore, if the application ended from
+                // a signal, zero-out the return code (indicating that the
+                // application process exited gracefully).
+                WaitStatus::Exited(_, code) => code,
+                _ => 0,
+            };
+            // Close and exit each device proxy.
+            exit_proxies(args.app_output, &shutdown_writep)?;
+            // Write the return code to the host.
+            write_app_ret(code, cid)?;
         }
         ForkResult::Child => {
+            // Drop the shutdown pipe's so that we don't leak them into the exec'd application.
+            drop(shutdown_writep);
+            drop(shutdown_readp);
+
             // Execute the enclave application.
             launch(args.exec_argv, args.exec_envp)?;
         }

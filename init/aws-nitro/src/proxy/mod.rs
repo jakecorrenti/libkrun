@@ -32,6 +32,8 @@ const ETH_HEADER_LEN: i32 = 14;
 /// This allows the host to read application output.
 fn init_output_proxy(vsock_port: u32) -> anyhow::Result<()> {
     let stream = connect_host(vsock_port)?;
+    // STDERR and STDOUT now point to the vsock, so we can let the original vsock fd be dropped
+    // when it goes out of scope and close the streams when we're ready.
     unistd::dup2_stderr(&stream).context("unable to redirect stderr to vsock")?;
     unistd::dup2_stdout(&stream).context("unable to redirect stdout to vsock")
 }
@@ -486,10 +488,13 @@ fn init_signal_handler_proxy(
     Ok(())
 }
 
-pub fn init(cid: u32, args: &super::args_reader::EnclaveArgs) -> anyhow::Result<()> {
+pub fn init(
+    cid: u32,
+    args: &super::args_reader::EnclaveArgs,
+    shutdown_read: &OwnedFd,
+    shutdown_write: &OwnedFd,
+) -> anyhow::Result<()> {
     let (readp, writep) = nix::unistd::pipe().context("unable to create readiness pipe")?;
-    let (shutdown_read, shutdown_write) =
-        nix::unistd::pipe().context("unable to create shutdown pipe")?;
 
     // If not running in debug mode, initialize the application output proxy.
     // Otherwise, the enclave uses the console (which is already connected)
@@ -503,8 +508,8 @@ pub fn init(cid: u32, args: &super::args_reader::EnclaveArgs) -> anyhow::Result<
         init_network_proxy(
             &readp,
             &writep,
-            &shutdown_write,
-            &shutdown_read,
+            shutdown_write,
+            shutdown_read,
             cid + VSOCK_PORT_OFFSET_NET,
         )?;
     }
@@ -513,8 +518,8 @@ pub fn init(cid: u32, args: &super::args_reader::EnclaveArgs) -> anyhow::Result<
     init_signal_handler_proxy(
         &readp,
         &writep,
-        &shutdown_write,
-        &shutdown_read,
+        shutdown_write,
+        shutdown_read,
         cid + VSOCK_PORT_OFFSET_SIGNAL_HANDLER,
     )?;
 

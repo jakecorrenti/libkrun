@@ -16,5 +16,6 @@ path = "src/main.rs"
 anyhow = "1.0.103"
 aws-nitro-enclaves-nsm-api = "0.5.2"
 nix = { version = "0.31.3", features = ["fs", "ioctl", "mount", "poll", "signal", "socket"] }
+signal-hook = "0.4.4"
 tar = "0.4.46"
 vsock = "0.5.4"
