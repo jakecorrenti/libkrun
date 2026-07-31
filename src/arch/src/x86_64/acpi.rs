@@ -21,6 +21,9 @@ use crate::x86_64::layout::{HIMEM_START, RSDP_ADDR};
 const LOCAL_APIC_DEFAULT_PHYS_BASE: u32 = 0xfee0_0000;
 /// Standard I/O APIC physical base address.
 const IO_APIC_DEFAULT_PHYS_BASE: u32 = 0xfec0_0000;
+/// With APIC/xAPIC, there are only 255 APIC IDs available, and the I/O APIC
+/// occupies one, so at most 254 CPUs can be represented in the MADT.
+const MAX_SUPPORTED_CPUS: u32 = 254;
 
 /// Builds a 36-byte ACPI 2.0+ RSDP pointing at the given XSDT address.
 fn build_rsdp(xsdt_addr: u64) -> Vec<u8> {
@@ -90,6 +93,8 @@ pub enum Error {
     NotEnoughMemory,
     /// Failed to write a table into guest memory.
     WriteFailed,
+    /// `num_cpus` exceeds what a single MADT I/O APIC entry ID (`num_cpus + 1`, a u8) can represent.
+    TooManyCpus,
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -99,6 +104,10 @@ pub type Result<T> = result::Result<T, Error>;
 /// including TEE — unlike `mptable::setup_mptable`, this is not gated by
 /// the `tee` feature.
 pub fn setup_acpi(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<()> {
+    if u32::from(num_cpus) > MAX_SUPPORTED_CPUS {
+        return Err(Error::TooManyCpus);
+    }
+
     let dsdt = build_dsdt();
     let madt = build_madt(num_cpus);
 
@@ -247,5 +256,13 @@ mod tests {
     fn setup_acpi_fails_if_window_too_small() {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(RSDP_ADDR), 8)]).unwrap();
         assert!(setup_acpi(&mem, 4).is_err());
+    }
+
+    #[test]
+    fn setup_acpi_fails_if_too_many_cpus() {
+        let window_size = (HIMEM_START - RSDP_ADDR) as usize;
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(RSDP_ADDR), window_size)]).unwrap();
+
+        assert_eq!(setup_acpi(&mem, 255), Err(Error::TooManyCpus));
     }
 }
