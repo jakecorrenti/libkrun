@@ -98,7 +98,6 @@ pub type Result<T> = result::Result<T, Error>;
 /// starting at `RSDP_ADDR`. Must be called for every payload type,
 /// including TEE — unlike `mptable::setup_mptable`, this is not gated by
 /// the `tee` feature.
-#[allow(dead_code)]
 pub fn setup_acpi(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<()> {
     let dsdt = build_dsdt();
     let madt = build_madt(num_cpus);

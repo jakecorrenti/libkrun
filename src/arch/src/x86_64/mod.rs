@@ -61,6 +61,8 @@ unsafe impl ByteValued for BootParamsWrapper {}
 pub enum Error {
     /// Invalid e820 setup params.
     E820Configuration,
+    /// Invalid ACPI table setup params.
+    AcpiSetup(acpi::Error),
     /// Error writing MP table to memory.
     #[cfg(not(feature = "tee"))]
     MpTableSetup(mptable::Error),
@@ -297,6 +299,8 @@ pub fn configure_system(
     #[cfg(not(feature = "tee"))]
     mptable::setup_mptable(guest_mem, num_cpus).map_err(Error::MpTableSetup)?;
 
+    acpi::setup_acpi(guest_mem, num_cpus).map_err(Error::AcpiSetup)?;
+
     if pvh {
         #[cfg(all(not(feature = "tee"), target_os = "linux"))]
         configure_pvh(guest_mem, arch_memory_info, cmdline_addr, initrd)?;
@@ -474,6 +478,15 @@ fn configure_64bit_boot(
     let zero_page_addr = GuestAddress(layout::ZERO_PAGE_START);
     guest_mem
         .write_obj(params, zero_page_addr)
+        .map_err(|_| Error::ZeroPageSetup)?;
+
+    // acpi_rsdp_addr lives at byte offset 0x70 (112) in the real kernel
+    // ABI's boot_params struct. The vendored bindgen bindings here predate
+    // that named field — it falls inside `_pad3`, which starts at exactly
+    // that offset. Writing the raw u64 there is ABI-equivalent to setting
+    // the named field on current kernels.
+    guest_mem
+        .write_obj(layout::RSDP_ADDR, zero_page_addr.unchecked_add(0x70))
         .map_err(|_| Error::ZeroPageSetup)?;
 
     Ok(())
