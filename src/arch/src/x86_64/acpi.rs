@@ -8,6 +8,7 @@ use acpi_tables::madt::{
 };
 use acpi_tables::rsdp::Rsdp;
 use acpi_tables::sdt::Sdt;
+use acpi_tables::xsdt::XSDT;
 use zerocopy::IntoBytes;
 
 /// Standard local APIC physical base address.
@@ -66,6 +67,18 @@ fn build_madt(num_cpus: u8) -> Vec<u8> {
 
     let mut bytes = Vec::new();
     madt.to_aml_bytes(&mut bytes);
+    bytes
+}
+
+/// Builds an ACPI 2.0+ XSDT with entries for the given 64-bit table addresses.
+#[allow(dead_code)]
+fn build_xsdt(entry_addrs: &[u64]) -> Vec<u8> {
+    let mut xsdt = XSDT::new(*b"LIBKRN", *b"KRUNXSDT", 1);
+    for addr in entry_addrs {
+        xsdt.add_entry(*addr);
+    }
+    let mut bytes = Vec::new();
+    xsdt.to_aml_bytes(&mut bytes);
     bytes
 }
 
@@ -135,5 +148,22 @@ mod tests {
         // x_dsdt field is at byte offset 140, little-endian u64 (ACPI 6.x FADT layout).
         let x_dsdt = u64::from_le_bytes(bytes[140..148].try_into().unwrap());
         assert_eq!(x_dsdt, 0x000e_1100);
+    }
+
+    #[test]
+    fn xsdt_lists_all_entry_addresses() {
+        let entries = [0x000e_2000u64, 0x000e_3000u64];
+        let bytes = build_xsdt(&entries);
+        assert_eq!(&bytes[0..4], b"XSDT");
+
+        let sum: u8 = bytes.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+        assert_eq!(sum, 0);
+
+        let header_size = 36; // fixed ACPI SDT header size
+        for (i, expected) in entries.iter().enumerate() {
+            let off = header_size + i * 8;
+            let got = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
+            assert_eq!(got, *expected);
+        }
     }
 }
