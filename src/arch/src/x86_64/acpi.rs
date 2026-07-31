@@ -3,9 +3,17 @@
 
 use acpi_tables::Aml;
 use acpi_tables::fadt::{FADTBuilder, Flags};
+use acpi_tables::madt::{
+    EnabledStatus, IoApic, LocalInterruptController, MADT, ProcessorLocalApic,
+};
 use acpi_tables::rsdp::Rsdp;
 use acpi_tables::sdt::Sdt;
 use zerocopy::IntoBytes;
+
+/// Standard local APIC physical base address.
+const LOCAL_APIC_DEFAULT_PHYS_BASE: u32 = 0xfee0_0000;
+/// Standard I/O APIC physical base address.
+const IO_APIC_DEFAULT_PHYS_BASE: u32 = 0xfec0_0000;
 
 /// Builds a 36-byte ACPI 2.0+ RSDP pointing at the given XSDT address.
 #[allow(dead_code)]
@@ -35,9 +43,62 @@ fn build_fadt(dsdt_addr: u64) -> Vec<u8> {
     bytes
 }
 
+/// Builds an ACPI 6.x MADT with one Processor Local APIC entry per vCPU
+/// and one I/O APIC entry.
+#[allow(dead_code)]
+fn build_madt(num_cpus: u8) -> Vec<u8> {
+    let mut madt = MADT::new(
+        *b"LIBKRN",
+        *b"KRUNAPIC",
+        1,
+        LocalInterruptController::Address(LOCAL_APIC_DEFAULT_PHYS_BASE),
+    );
+
+    for cpu_id in 0..num_cpus {
+        madt.add_structure(ProcessorLocalApic::new(
+            cpu_id,
+            cpu_id,
+            EnabledStatus::Enabled,
+        ));
+    }
+
+    madt.add_structure(IoApic::new(num_cpus + 1, IO_APIC_DEFAULT_PHYS_BASE, 0));
+
+    let mut bytes = Vec::new();
+    madt.to_aml_bytes(&mut bytes);
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn madt_has_one_lapic_entry_per_cpu() {
+        let num_cpus = 4u8;
+        let bytes = build_madt(num_cpus);
+        assert_eq!(&bytes[0..4], b"APIC");
+
+        let sum: u8 = bytes.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+        assert_eq!(sum, 0);
+
+        // Fixed MADT header is 44 bytes (36-byte SDT header + 4 + 4), per ACPI 6.x.
+        let mut offset = 44usize;
+        let mut lapic_count = 0;
+        let mut ioapic_count = 0;
+        while offset < bytes.len() {
+            let entry_type = bytes[offset];
+            let entry_len = bytes[offset + 1] as usize;
+            match entry_type {
+                0 => lapic_count += 1,
+                1 => ioapic_count += 1,
+                t => panic!("unexpected MADT entry type {t}"),
+            }
+            offset += entry_len;
+        }
+        assert_eq!(lapic_count, num_cpus as usize);
+        assert_eq!(ioapic_count, 1);
+    }
 
     #[test]
     fn rsdp_checksums_are_valid() {
