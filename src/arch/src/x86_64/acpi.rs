@@ -12,7 +12,7 @@ use acpi_tables::rsdp::Rsdp;
 use acpi_tables::sdt::Sdt;
 use acpi_tables::xsdt::XSDT;
 use vm_memory::Bytes;
-use vm_memory::{GuestAddress, GuestMemoryMmap};
+use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
 use zerocopy::IntoBytes;
 
 use crate::x86_64::layout::{HIMEM_START, RSDP_ADDR};
@@ -124,7 +124,9 @@ pub fn setup_acpi(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<()> {
         + fadt.len() as u64
         + dsdt.len() as u64
         + madt.len() as u64;
-    if rsdp_addr + total_size > HIMEM_START {
+    if rsdp_addr + total_size > HIMEM_START
+        || !mem.check_range(GuestAddress(rsdp_addr), total_size as usize)
+    {
         return Err(Error::NotEnoughMemory);
     }
 
