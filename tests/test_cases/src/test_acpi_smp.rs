@@ -67,10 +67,37 @@ mod guest {
 
     impl Test for TestAcpiSmp {
         fn in_guest(self: Box<Self>) {
-            // The kernel only exposes a table under /sys/firmware/acpi/tables/
-            // if it actually parsed that table at boot via ACPI (not the
-            // MP-table path) -- this is the concrete signal this plan's
-            // Global Constraints require checking for.
+            if let Ok(ver) = fs::read_to_string("/proc/version") {
+                eprintln!("KERNEL: {}", ver.trim());
+            }
+            {
+                use std::io::Read;
+                use std::os::unix::fs::OpenOptionsExt;
+                if let Ok(mut f) = fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(0x800)
+                    .open("/dev/kmsg")
+                {
+                    let mut buf = vec![0u8; 512 * 1024];
+                    let mut total = 0;
+                    loop {
+                        match f.read(&mut buf[total..]) {
+                            Ok(0) => break,
+                            Ok(n) => total += n,
+                            Err(_) => break,
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&buf[..total]);
+                    for line in text.lines() {
+                        let lower = line.to_lowercase();
+                        if lower.contains("acpi") || lower.contains("rsdp") {
+                            eprintln!("KMSG: {}", line);
+                        }
+                    }
+                }
+            }
+            // These sysfs entries only exist when the kernel parsed the
+            // tables via ACPI, not the MP-table fallback path.
             assert!(
                 Path::new("/sys/firmware/acpi/tables/APIC").exists(),
                 "kernel did not parse the MADT -- ACPI was not used for boot"
