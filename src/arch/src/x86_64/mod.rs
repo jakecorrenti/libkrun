@@ -341,7 +341,7 @@ fn configure_pvh(
     add_memmap_entry(
         &mut memmap,
         mptable::MPTABLE_START,
-        layout::RSDP_ADDR - mptable::MPTABLE_START,
+        layout::HIMEM_START - mptable::MPTABLE_START,
         E820_RESERVED,
     );
     let last_addr = GuestAddress(arch_memory_info.ram_last_addr);
@@ -372,6 +372,7 @@ fn configure_pvh(
         magic: XEN_HVM_START_MAGIC_VALUE,
         version: 1,
         cmdline_paddr: cmdline_addr.raw_value(),
+        rsdp_paddr: layout::RSDP_ADDR,
         memmap_paddr: layout::MEMMAP_START,
         memmap_entries: memmap.len() as u32,
         nr_modules: modules.len() as u32,
@@ -423,6 +424,7 @@ fn configure_64bit_boot(
     params.0.hdr.cmd_line_ptr = cmdline_addr.raw_value() as u32;
     params.0.hdr.cmdline_size = cmdline_size as u32;
 
+    params.0.hdr.version = 0x020e;
     params.0.hdr.kernel_alignment = KERNEL_MIN_ALIGNMENT_BYTES;
     if let Some(initrd_config) = initrd {
         params.0.hdr.ramdisk_image = initrd_config.address.raw_value() as u32;
@@ -441,6 +443,12 @@ fn configure_64bit_boot(
             params.0.hdr.syssize = num_cpus as u32;
         }
         add_e820_entry(&mut params.0, 0, EBDA_START, E820_RAM)?;
+        add_e820_entry(
+            &mut params.0,
+            EBDA_START,
+            layout::HIMEM_START - EBDA_START,
+            E820_RESERVED,
+        )?;
     }
 
     let last_addr = GuestAddress(arch_memory_info.ram_last_addr);
