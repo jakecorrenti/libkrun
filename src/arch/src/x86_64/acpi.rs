@@ -38,15 +38,38 @@ fn build_dsdt() -> Vec<u8> {
 }
 
 /// Builds a minimal ACPI 6.x FADT pointing at the given DSDT address.
+///
+/// HW_REDUCED_ACPI is deliberately NOT set: it causes the kernel to
+/// replace legacy_pic with null_legacy_pic (nr_legacy_irqs = 0), which
+/// breaks the GSI-to-Linux-IRQ identity mapping that virtio_mmio.device=
+/// command line parameters rely on. Instead, minimal PM1a blocks point
+/// to unused I/O ports so the kernel accepts the FADT without needing
+/// real ACPI PM hardware.
 fn build_fadt(dsdt_addr: u64) -> Vec<u8> {
     let fadt = FADTBuilder::new(*b"LIBKRN", *b"KRUNFADT", 1)
-        .acpi_enable()
         .dsdt_64(dsdt_addr)
         .flag(Flags::PwrButton)
         .flag(Flags::SlpButton)
         .finalize();
     let mut bytes = Vec::new();
     fadt.to_aml_bytes(&mut bytes);
+
+    const SCI_INT: usize = 46;
+    const PM1A_EVT_BLK: usize = 56;
+    const PM1A_CNT_BLK: usize = 64;
+    const PM1_EVT_LEN: usize = 88;
+    const PM1_CNT_LEN: usize = 89;
+    const CHECKSUM: usize = 9;
+
+    bytes[SCI_INT..SCI_INT + 2].copy_from_slice(&9u16.to_le_bytes());
+    bytes[PM1A_EVT_BLK..PM1A_EVT_BLK + 4].copy_from_slice(&0x600u32.to_le_bytes());
+    bytes[PM1A_CNT_BLK..PM1A_CNT_BLK + 4].copy_from_slice(&0x604u32.to_le_bytes());
+    bytes[PM1_EVT_LEN] = 4;
+    bytes[PM1_CNT_LEN] = 2;
+
+    bytes[CHECKSUM] = 0;
+    bytes[CHECKSUM] = (!bytes.iter().fold(0u8, |a, &b| a.wrapping_add(b))).wrapping_add(1);
+
     bytes
 }
 
@@ -72,6 +95,17 @@ fn build_madt(num_cpus: u8) -> Vec<u8> {
 
     let mut bytes = Vec::new();
     madt.to_aml_bytes(&mut bytes);
+
+    // The acpi_tables crate leaves the MADT flags field (offset 40) at 0,
+    // but KVM emulates dual 8259 PICs so PCAT_COMPAT (bit 0) must be set.
+    // Without it the kernel assumes no legacy PICs exist and skips legacy
+    // IRQ routing, which prevents the PIT timer interrupt from firing.
+    const MADT_FLAGS_OFFSET: usize = 40;
+    const CHECKSUM_OFFSET: usize = 9;
+    bytes[MADT_FLAGS_OFFSET] |= 1;
+    bytes[CHECKSUM_OFFSET] = 0;
+    bytes[CHECKSUM_OFFSET] = (!bytes.iter().fold(0u8, |a, &b| a.wrapping_add(b))).wrapping_add(1);
+
     bytes
 }
 
@@ -111,11 +145,9 @@ pub fn setup_acpi(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<()> {
     let dsdt = build_dsdt();
     let madt = build_madt(num_cpus);
 
-    // RSDP is a fixed 36 bytes; XSDT's size depends only on its entry
-    // count (2: FADT + MADT), not their addresses.
     const RSDP_SIZE: u64 = 36;
-    let xsdt_size = 36 + 2 * 8; // fixed SDT header + 2 entries
-    let fadt_size_placeholder = build_fadt(0).len() as u64; // FADT's size doesn't vary with dsdt_addr's value
+    let xsdt_size = 36 + 2 * 8; // fixed SDT header + 2 entries (FADT + MADT)
+    let fadt_size_placeholder = build_fadt(0).len() as u64;
 
     let rsdp_addr = RSDP_ADDR;
     let xsdt_addr = rsdp_addr + RSDP_SIZE;
