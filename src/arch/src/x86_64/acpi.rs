@@ -4,6 +4,9 @@
 use std::result;
 
 use acpi_tables::Aml;
+use acpi_tables::aml::{
+    Device, EISAName, IO, Interrupt, Memory32Fixed, Name, Path, ResourceTemplate, Scope,
+};
 use acpi_tables::fadt::{FADTBuilder, Flags};
 use acpi_tables::madt::{
     EnabledStatus, IoApic, LocalInterruptController, MADT, ProcessorLocalApic,
@@ -30,11 +33,59 @@ fn build_rsdp(xsdt_addr: u64) -> Vec<u8> {
     Rsdp::new(*b"LIBKRN", xsdt_addr).as_bytes().to_vec()
 }
 
-/// Builds a minimal valid DSDT (36-byte header, no AML body).
-fn build_dsdt() -> Vec<u8> {
-    Sdt::new(*b"DSDT", 36, 2, *b"LIBKRN", *b"KRUNDSDT", 1)
-        .as_slice()
-        .to_vec()
+fn build_dsdt(virtio_mmio_devices: &[(u64, u32)]) -> Vec<u8> {
+    let mut aml_body = Vec::new();
+
+    // (io_base, irq, acpi_device_name) — PC/AT standard COM port assignments
+    const COM_PORTS: [(u16, u32, &str); 4] = [
+        (0x3F8, 4, "COM1"),
+        (0x2F8, 3, "COM2"),
+        (0x3E8, 4, "COM3"),
+        (0x2E8, 3, "COM4"),
+    ];
+    for (i, &(io_base, irq, name)) in COM_PORTS.iter().enumerate() {
+        let hid = Name::new(Path::new("_HID"), &EISAName::new("PNP0501"));
+        let uid = Name::new(Path::new("_UID"), &(i as u32));
+        let io_res = IO::new(io_base, io_base, 0x08, 0x08);
+        let irq_res = Interrupt::new(true, true, false, false, irq);
+        let crs = Name::new(
+            Path::new("_CRS"),
+            &ResourceTemplate::new(vec![&io_res, &irq_res]),
+        );
+        Device::new(Path::new(name), vec![&hid, &uid, &crs]).to_aml_bytes(&mut aml_body);
+    }
+
+    {
+        let hid = Name::new(Path::new("_HID"), &EISAName::new("PNP0303"));
+        let uid = Name::new(Path::new("_UID"), &0u32);
+        let io_data = IO::new(0x0060, 0x0060, 0x01, 0x01);
+        let io_cmd = IO::new(0x0064, 0x0064, 0x01, 0x01);
+        let irq_res = Interrupt::new(true, true, false, false, 1);
+        let crs = Name::new(
+            Path::new("_CRS"),
+            &ResourceTemplate::new(vec![&io_data, &io_cmd, &irq_res]),
+        );
+        Device::new(Path::new("KBD0"), vec![&hid, &uid, &crs]).to_aml_bytes(&mut aml_body);
+    }
+
+    for (i, &(mmio_base, irq)) in virtio_mmio_devices.iter().enumerate() {
+        let name = format!("VR{i:02X}");
+        let hid = Name::new(Path::new("_HID"), &"LNRO0005");
+        let uid = Name::new(Path::new("_UID"), &(i as u32));
+        let mem = Memory32Fixed::new(true, mmio_base as u32, 0x1000);
+        let irq_res = Interrupt::new(true, false, false, false, irq);
+        let crs = Name::new(
+            Path::new("_CRS"),
+            &ResourceTemplate::new(vec![&mem, &irq_res]),
+        );
+        Device::new(Path::new(&name), vec![&hid, &uid, &crs]).to_aml_bytes(&mut aml_body);
+    }
+
+    let scope_bytes = Scope::raw(Path::new("\\_SB_"), aml_body);
+
+    let mut dsdt = Sdt::new(*b"DSDT", 36, 2, *b"LIBKRN", *b"KRUNDSDT", 1);
+    dsdt.append_slice(&scope_bytes);
+    dsdt.as_slice().to_vec()
 }
 
 /// Builds a minimal ACPI 6.x FADT pointing at the given DSDT address.
@@ -142,7 +193,7 @@ pub fn setup_acpi(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<()> {
         return Err(Error::TooManyCpus);
     }
 
-    let dsdt = build_dsdt();
+    let dsdt = build_dsdt(&[]);
     let madt = build_madt(num_cpus);
 
     const RSDP_SIZE: u64 = 36;
@@ -232,12 +283,32 @@ mod tests {
     }
 
     #[test]
-    fn dsdt_is_valid_empty_table() {
-        let bytes = build_dsdt();
-        assert_eq!(&bytes[0..4], b"DSDT");
-        assert_eq!(bytes.len(), 36); // fixed ACPI SDT header size, no AML body
+    fn dsdt_contains_device_nodes() {
+        let devices = vec![(0xd000_0000u64, 5u32), (0xd000_1000, 6)];
+        let bytes = build_dsdt(&devices);
+
+        assert_eq!(&bytes[..4], b"DSDT");
+
         let sum: u8 = bytes.iter().fold(0u8, |a, &b| a.wrapping_add(b));
         assert_eq!(sum, 0);
+
+        let length = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert!(length > 36);
+
+        assert!(bytes.len() > 100);
+    }
+
+    #[test]
+    fn dsdt_empty_devices() {
+        let bytes = build_dsdt(&[]);
+
+        assert_eq!(&bytes[..4], b"DSDT");
+        let sum: u8 = bytes.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+        assert_eq!(sum, 0);
+
+        // Even with no virtio devices, ISA devices are still present
+        let length = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert!(length > 36);
     }
 
     #[test]
