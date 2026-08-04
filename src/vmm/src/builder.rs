@@ -2129,20 +2129,13 @@ fn attach_mmio_device(
     let mmio_device = MmioTransport::new(vmm.guest_memory().clone(), intc, device)?;
 
     let type_id = mmio_device.locked_device().device_type();
-    let _cmdline = &mut vmm.kernel_cmdline;
 
     #[cfg(target_os = "linux")]
-    let (_mmio_base, _irq) =
-        vmm.mmio_device_manager
-            .register_mmio_device(vmm.vm.fd(), mmio_device, type_id, id)?;
-    #[cfg(target_os = "macos")]
-    let (_mmio_base, _irq) =
-        vmm.mmio_device_manager
-            .register_mmio_device(mmio_device, type_id, id)?;
-
-    #[cfg(target_arch = "x86_64")]
     vmm.mmio_device_manager
-        .add_device_to_cmdline(_cmdline, _mmio_base, _irq)?;
+        .register_mmio_device(vmm.vm.fd(), mmio_device, type_id, id)?;
+    #[cfg(target_os = "macos")]
+    vmm.mmio_device_manager
+        .register_mmio_device(mmio_device, type_id, id)?;
 
     Ok(())
 }
