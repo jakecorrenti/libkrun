@@ -153,15 +153,17 @@ pub enum Error {
 pub type Result<T> = result::Result<T, Error>;
 
 /// Builds and writes RSDP, XSDT, FADT, DSDT, and MADT into guest memory
-/// starting at `RSDP_ADDR`. Must be called for every payload type,
-/// including TEE — unlike `mptable::setup_mptable`, this is not gated by
-/// the `tee` feature.
-pub fn setup_acpi(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<()> {
+/// starting at `RSDP_ADDR`. Must be called for every payload type, including TEE.
+pub fn setup_acpi(
+    mem: &GuestMemoryMmap,
+    num_cpus: u8,
+    virtio_mmio_devices: &[(u64, u32)],
+) -> Result<()> {
     if u32::from(num_cpus) > MAX_SUPPORTED_CPUS {
         return Err(Error::TooManyCpus);
     }
 
-    let dsdt = build_dsdt(&[]);
+    let dsdt = build_dsdt(virtio_mmio_devices);
     let madt = build_madt(num_cpus);
 
     const RSDP_SIZE: u64 = 36;
@@ -323,7 +325,7 @@ mod tests {
         let window_size = (HIMEM_START - RSDP_ADDR) as usize;
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(RSDP_ADDR), window_size)]).unwrap();
 
-        setup_acpi(&mem, 4).unwrap();
+        setup_acpi(&mem, 4, &[]).unwrap();
 
         let rsdp: [u8; 8] = {
             let mut buf = [0u8; 8];
@@ -336,7 +338,7 @@ mod tests {
     #[test]
     fn setup_acpi_fails_if_window_too_small() {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(RSDP_ADDR), 8)]).unwrap();
-        assert!(setup_acpi(&mem, 4).is_err());
+        assert!(setup_acpi(&mem, 4, &[]).is_err());
     }
 
     #[test]
@@ -344,6 +346,6 @@ mod tests {
         let window_size = (HIMEM_START - RSDP_ADDR) as usize;
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(RSDP_ADDR), window_size)]).unwrap();
 
-        assert_eq!(setup_acpi(&mem, 255), Err(Error::TooManyCpus));
+        assert_eq!(setup_acpi(&mem, 255, &[]), Err(Error::TooManyCpus));
     }
 }

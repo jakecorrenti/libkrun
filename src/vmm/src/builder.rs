@@ -1145,11 +1145,16 @@ pub fn build_microvm(
     #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
     load_cmdline(&vmm)?;
 
+    #[cfg(target_os = "linux")]
+    let virtio_mmio_devices = vmm.mmio_device_manager.virtio_mmio_devices();
+    #[cfg(not(target_os = "linux"))]
+    let virtio_mmio_devices: Vec<(u64, u32)> = vec![];
     vmm.configure_system(
         vcpus.as_slice(),
         &intc,
         &payload_config.initrd_config,
         &vm_resources.smbios_oem_strings,
+        &virtio_mmio_devices,
         payload_config.pvh,
     )
     .map_err(StartMicrovmError::Internal)?;

@@ -11,8 +11,6 @@ mod gdt;
 pub mod interrupts;
 /// Layout for the x86_64 system.
 pub mod layout;
-#[cfg(not(feature = "tee"))]
-mod mptable;
 /// Logic for configuring x86_64 model specific registers (MSRs).
 pub mod msr;
 /// Logic for configuring x86_64 registers.
@@ -31,7 +29,6 @@ use crate::x86_64::layout::{EBDA_START, FIRST_ADDR_PAST_32BITS, MMIO_MEM_START};
 #[cfg(feature = "tee")]
 use crate::x86_64::layout::{FIRMWARE_SIZE, FIRMWARE_START};
 use crate::{ArchMemoryInfo, InitrdConfig};
-#[cfg(all(not(feature = "tee"), target_os = "linux"))]
 use arch_gen::x86::bootparam::E820_RESERVED;
 use arch_gen::x86::bootparam::{E820_RAM, boot_params};
 use vm_memory::Bytes;
@@ -63,9 +60,6 @@ pub enum Error {
     E820Configuration,
     /// Invalid ACPI table setup params.
     AcpiSetup(acpi::Error),
-    /// Error writing MP table to memory.
-    #[cfg(not(feature = "tee"))]
-    MpTableSetup(mptable::Error),
     /// Error writing hvm_start_info to guest memory.
     #[cfg(all(not(feature = "tee"), target_os = "linux"))]
     StartInfoSetup,
@@ -285,7 +279,7 @@ pub fn arch_memory_regions(
 /// * `initrd` - Information about where the ramdisk image was loaded in the `guest_mem`.
 /// * `num_cpus` - Number of virtual CPUs the guest will have.
 /// * `pvh` - Whether to use the PVH boot protocol.
-#[allow(unused_variables)]
+#[allow(unused_variables, clippy::too_many_arguments)]
 pub fn configure_system(
     guest_mem: &GuestMemoryMmap,
     arch_memory_info: &ArchMemoryInfo,
@@ -294,12 +288,9 @@ pub fn configure_system(
     initrd: &Option<InitrdConfig>,
     num_cpus: u8,
     pvh: bool,
+    virtio_mmio_devices: &[(u64, u32)],
 ) -> super::Result<()> {
-    // Note that this puts the mptable at the last 1k of Linux's 640k base RAM
-    #[cfg(not(feature = "tee"))]
-    mptable::setup_mptable(guest_mem, num_cpus).map_err(Error::MpTableSetup)?;
-
-    acpi::setup_acpi(guest_mem, num_cpus).map_err(Error::AcpiSetup)?;
+    acpi::setup_acpi(guest_mem, num_cpus, virtio_mmio_devices).map_err(Error::AcpiSetup)?;
 
     if pvh {
         #[cfg(all(not(feature = "tee"), target_os = "linux"))]
@@ -337,11 +328,11 @@ fn configure_pvh(
         });
     }
     let mut memmap: Vec<hvm_memmap_table_entry> = Vec::new();
-    add_memmap_entry(&mut memmap, 0, mptable::MPTABLE_START, E820_RAM);
+    add_memmap_entry(&mut memmap, 0, EBDA_START, E820_RAM);
     add_memmap_entry(
         &mut memmap,
-        mptable::MPTABLE_START,
-        layout::HIMEM_START - mptable::MPTABLE_START,
+        EBDA_START,
+        layout::HIMEM_START - EBDA_START,
         E820_RESERVED,
     );
     let last_addr = GuestAddress(arch_memory_info.ram_last_addr);
@@ -566,13 +557,8 @@ mod tests {
         let no_vcpus = 4;
         let gm = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let info = ArchMemoryInfo::default();
-        let config_err = configure_system(&gm, &info, GuestAddress(0), 0, &None, 1, false);
+        let config_err = configure_system(&gm, &info, GuestAddress(0), 0, &None, 1, false, &[]);
         assert!(config_err.is_err());
-        #[cfg(not(feature = "tee"))]
-        assert_eq!(
-            config_err.unwrap_err(),
-            super::Error::MpTableSetup(mptable::Error::NotEnoughMemory)
-        );
 
         // Now assigning some memory that falls before the 32bit memory hole.
         let mem_size = 128 << 20;
@@ -587,6 +573,7 @@ mod tests {
             &None,
             no_vcpus,
             false,
+            &[],
         )
         .unwrap();
 
@@ -603,6 +590,7 @@ mod tests {
             &None,
             no_vcpus,
             false,
+            &[],
         )
         .unwrap();
 
@@ -619,6 +607,7 @@ mod tests {
             &None,
             no_vcpus,
             false,
+            &[],
         )
         .unwrap();
     }
