@@ -89,12 +89,13 @@ fn build_dsdt(virtio_mmio_devices: &[(u64, u32)]) -> Vec<u8> {
 }
 
 /// Builds a minimal ACPI 6.x FADT pointing at the given DSDT address.
+/// HW_REDUCED_ACPI is set: all devices are described in the DSDT via
+/// extended interrupt descriptors, so no legacy PIC or PM hardware is
+/// needed.
 fn build_fadt(dsdt_addr: u64) -> Vec<u8> {
     let fadt = FADTBuilder::new(*b"LIBKRN", *b"KRUNFADT", 1)
-        .acpi_enable()
         .dsdt_64(dsdt_addr)
-        .flag(Flags::PwrButton)
-        .flag(Flags::SlpButton)
+        .flag(Flags::HwReducedAcpi)
         .finalize();
     let mut bytes = Vec::new();
     fadt.to_aml_bytes(&mut bytes);
@@ -123,6 +124,7 @@ fn build_madt(num_cpus: u8) -> Vec<u8> {
 
     let mut bytes = Vec::new();
     madt.to_aml_bytes(&mut bytes);
+
     bytes
 }
 
@@ -162,11 +164,9 @@ pub fn setup_acpi(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<()> {
     let dsdt = build_dsdt(&[]);
     let madt = build_madt(num_cpus);
 
-    // RSDP is a fixed 36 bytes; XSDT's size depends only on its entry
-    // count (2: FADT + MADT), not their addresses.
     const RSDP_SIZE: u64 = 36;
-    let xsdt_size = 36 + 2 * 8; // fixed SDT header + 2 entries
-    let fadt_size_placeholder = build_fadt(0).len() as u64; // FADT's size doesn't vary with dsdt_addr's value
+    let xsdt_size = 36 + 2 * 8; // fixed SDT header + 2 entries (FADT + MADT)
+    let fadt_size_placeholder = build_fadt(0).len() as u64;
 
     let rsdp_addr = RSDP_ADDR;
     let xsdt_addr = rsdp_addr + RSDP_SIZE;
@@ -277,6 +277,16 @@ mod tests {
         // Even with no virtio devices, ISA devices are still present
         let length = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
         assert!(length > 36);
+    }
+
+    #[test]
+    fn fadt_has_hw_reduced_flag() {
+        let bytes = build_fadt(0x000e_1100);
+
+        // FADT flags field is at byte offset 112 (per ACPI 6.x spec)
+        let flags = u32::from_le_bytes(bytes[112..116].try_into().unwrap());
+        // HW_REDUCED_ACPI is bit 20
+        assert_ne!(flags & (1 << 20), 0, "HW_REDUCED_ACPI must be set");
     }
 
     #[test]
