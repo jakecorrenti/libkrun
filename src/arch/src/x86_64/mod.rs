@@ -353,7 +353,7 @@ fn configure_pvh(
         add_memmap_entry(
             &mut memmap,
             himem_start.raw_value(),
-            last_addr.unchecked_offset_from(himem_start) + 1,
+            last_addr.unchecked_offset_from(himem_start),
             E820_RAM,
         );
     } else {
@@ -367,7 +367,7 @@ fn configure_pvh(
             add_memmap_entry(
                 &mut memmap,
                 first_addr_past_32bits.raw_value(),
-                last_addr.unchecked_offset_from(first_addr_past_32bits) + 1,
+                last_addr.unchecked_offset_from(first_addr_past_32bits),
                 E820_RAM,
             );
         }
@@ -454,7 +454,7 @@ fn configure_64bit_boot(
             himem_start.raw_value(),
             // it's safe to use unchecked_offset_from because
             // mem_end > himem_start
-            last_addr.unchecked_offset_from(himem_start) + 1,
+            last_addr.unchecked_offset_from(himem_start),
             E820_RAM,
         )?;
     } else {
@@ -473,7 +473,7 @@ fn configure_64bit_boot(
                 first_addr_past_32bits.raw_value(),
                 // it's safe to use unchecked_offset_from because
                 // mem_end > first_addr_past_32bits
-                last_addr.unchecked_offset_from(first_addr_past_32bits) + 1,
+                last_addr.unchecked_offset_from(first_addr_past_32bits),
                 E820_RAM,
             )?;
         }
