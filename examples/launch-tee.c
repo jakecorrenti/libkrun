@@ -25,12 +25,6 @@ int main(int argc, char *const argv[])
         "18000:8000",
         0
     };
-    const char *const rlimits[] =
-    {
-        // RLIMIT_NPROC = 6
-        "6=4096:8192",
-        0
-    };
     static const struct option long_opts[] = {
         { "td-shim", required_argument, 0, 's' },
         { 0, 0, 0, 0 }
@@ -92,6 +86,15 @@ int main(int argc, char *const argv[])
         return -1;
     }
 
+    // krun_start_enter() no longer defaults the kernel cmdline to
+    // "init=/init.krun"; the init binary is baked into the libkrunfw initrd
+    // bundle at that path, so we have to point the kernel at it explicitly.
+    if (err = krun_append_kernel_cmdline(ctx_id, "init=/init.krun")) {
+        errno = -err;
+        perror("Error configuring init path");
+        return -1;
+    }
+
     if (getcwd(&current_path[0], MAX_PATH) == NULL) {
         errno = -err;
         perror("Error getting current directory");
@@ -118,15 +121,19 @@ int main(int argc, char *const argv[])
         return -1;
     }
 
-    // Configure the rlimits that will be set in the guest
-    if (err = krun_set_rlimits(ctx_id, &rlimits[0])) {
+    // krun_set_rlimits()/krun_set_workdir() are unavailable for TEE guests;
+    // the kernel forwards unrecognized "NAME=value" cmdline arguments into
+    // init's environment, where the guest init applies them.
+
+    // Configure the rlimits that will be set in the guest (RLIMIT_NPROC = 6).
+    if (err = krun_append_kernel_cmdline(ctx_id, "KRUN_RLIMITS=6=4096:8192")) {
         errno = -err;
         perror("Error configuring rlimits");
         return -1;
     }
 
     // Set the working directory to "/", just for the sake of completeness.
-    if (err = krun_set_workdir(ctx_id, "/")) {
+    if (err = krun_append_kernel_cmdline(ctx_id, "KRUN_WORKDIR=/")) {
         errno = -err;
         perror("Error configuring \"/\" as working directory");
         return -1;
