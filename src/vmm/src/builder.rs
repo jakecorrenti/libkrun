@@ -679,22 +679,28 @@ fn measure_qboot_regions(
     } else {
         return Err(StartMicrovmError::MissingKernelConfig);
     };
-    let regions = vec![
-        MeasuredRegion {
-            guest_addr: 0,
-            host_addr: guest_memory.get_host_address(GuestAddress(0)).unwrap() as u64,
-            size: 0x8000_0000,
+
+    // Match actual guest RAM; a fixed 2 GiB size breaks mem_size_mib != 2048.
+    let mut regions: Vec<MeasuredRegion> = guest_memory
+        .iter()
+        .filter(|r| r.start_addr().0 < arch::x86_64::layout::MMIO_MEM_START)
+        .map(|r| MeasuredRegion {
+            guest_addr: r.start_addr().0,
+            host_addr: guest_memory.get_host_address(r.start_addr()).unwrap() as u64,
+            size: r.len() as usize,
             attributes: 0,
-        },
-        MeasuredRegion {
-            guest_addr: arch::FIRMWARE_START,
-            host_addr: guest_memory
-                .get_host_address(GuestAddress(arch::FIRMWARE_START))
-                .unwrap() as u64,
-            size: qboot_size,
-            attributes: 1,
-        },
-    ];
+        })
+        .collect();
+
+    regions.push(MeasuredRegion {
+        guest_addr: arch::FIRMWARE_START,
+        host_addr: guest_memory
+            .get_host_address(GuestAddress(arch::FIRMWARE_START))
+            .unwrap() as u64,
+        size: qboot_size,
+        attributes: 1,
+    });
+
     Ok((regions, 0u64))
 }
 
