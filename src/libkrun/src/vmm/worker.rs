@@ -19,6 +19,7 @@ use vm_memory::{
     Address, GuestAddress, GuestMemoryRegion, MemoryRegionAddress, guest_memory::GuestMemoryBackend,
 };
 
+#[allow(dead_code)]
 pub fn start_worker_thread(
     vmm: Arc<Mutex<super::Vmm>>,
     receiver: Receiver<WorkerMessage>,
@@ -41,6 +42,7 @@ pub fn start_worker_thread(
 }
 
 impl super::Vmm {
+    #[allow(dead_code)]
     fn match_worker_message(&self, msg: WorkerMessage) {
         match msg {
             #[cfg(target_os = "macos")]

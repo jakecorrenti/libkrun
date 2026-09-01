@@ -12,8 +12,10 @@ use libc::{c_int, c_void, siginfo_t};
 use std::cell::Cell;
 use std::fmt::{Display, Formatter};
 use std::io;
+#[cfg(all(feature = "tee", target_arch = "x86_64"))]
 use std::ops::Range;
 
+#[cfg(all(feature = "tee", target_arch = "x86_64"))]
 use std::os::unix::io::RawFd;
 
 #[cfg(target_arch = "x86_64")]
@@ -34,7 +36,7 @@ use super::tee::amdsnp::{AmdSnp, Error as SnpError};
 #[cfg(feature = "tdx")]
 use super::tee::inteltdx::{Error as TdxError, IntelTdx};
 
-#[cfg(feature = "tee")]
+#[cfg(feature = "amd-sev")]
 use kbs_types::Tee;
 
 #[cfg(feature = "tee")]
@@ -66,8 +68,7 @@ use utils::sm::StateMachine;
 #[cfg(feature = "tee")]
 use utils::worker_message::{MemoryProperties, WorkerMessage};
 use vm_memory::{
-    Address, GuestAddress, GuestMemoryBackend, GuestMemoryError, GuestMemoryMmap,
-    GuestMemoryRegion, GuestRegionMmap,
+    Address, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap,
 };
 
 #[cfg(feature = "amd-sev")]
@@ -77,6 +78,7 @@ use super::tee::amdsnp::launch as snp;
 pub(crate) const VCPU_RTSIG_OFFSET: i32 = 0;
 
 /// Errors associated with the wrappers over KVM ioctls.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum Error {
     #[cfg(target_arch = "x86_64")]
@@ -87,18 +89,12 @@ pub enum Error {
     #[cfg(target_arch = "x86_64")]
     /// Error configuring the floating point related registers
     FPUConfiguration(arch::x86_64::regs::Error),
-    /// Invalid guest memory configuration.
-    GuestMemoryMmap(GuestMemoryError),
     #[cfg(target_arch = "x86_64")]
     /// Retrieving supported guest MSRs fails.
     GuestMSRs(arch::x86_64::msr::Error),
-    /// Hyperthreading flag is not initialized.
-    HTNotInitialized,
     /// Unable to enable KVM hypercall exits.
     #[cfg(feature = "tee")]
     HypercallExitEnable(kvm_ioctls::Error),
-    /// Cannot configure the IRQ.
-    Irq(kvm_ioctls::Error),
     /// The host kernel reports an invalid KVM API version.
     KvmApiVersion(i32),
     /// Cannot initialize the KVM context due to missing capabilities.
@@ -109,9 +105,6 @@ pub enum Error {
     #[cfg(target_arch = "x86_64")]
     /// Cannot set the local interruption due to bad configuration.
     LocalIntConfiguration(arch::x86_64::interrupts::Error),
-    #[cfg(feature = "tee")]
-    /// Missing TEE config
-    MissingTeeConfig,
     #[cfg(target_arch = "x86_64")]
     /// Error configuring the MSR registers
     MSRSConfiguration(arch::x86_64::msr::Error),
@@ -130,8 +123,6 @@ pub enum Error {
     SetMemoryAttributes(kvm_ioctls::Error),
     /// Cannot set the memory regions.
     SetUserMemoryRegion(kvm_ioctls::Error),
-    /// Error creating memory map for SHM region.
-    ShmMmap(io::Error),
     #[cfg(feature = "amd-sev")]
     /// Error initializing the Secure Virtualization Backend (SNP).
     SnpSecVirtInit(SnpError),
@@ -144,9 +135,6 @@ pub enum Error {
     #[cfg(feature = "tdx")]
     /// Error preparing the VM for Trust Domain Extensions (TDX)
     TdxSecVirtPrepare(TdxError),
-    #[cfg(feature = "tdx")]
-    /// Error initializing vCPU for Trust Domain Extensions (TDX)
-    TdxSecVirtInitVcpu,
     #[cfg(feature = "tee")]
     /// The TEE specified is not supported.
     InvalidTee,
@@ -161,8 +149,6 @@ pub enum Error {
     #[cfg(target_arch = "aarch64")]
     /// Error getting the Vcpu preferred target on Arm.
     VcpuArmPreferredTarget(kvm_ioctls::Error),
-    /// vCPU count is not initialized.
-    VcpuCountNotInitialized,
     /// Cannot open the VCPU file descriptor.
     VcpuFd(kvm_ioctls::Error),
     #[cfg(target_arch = "x86_64")]
@@ -192,8 +178,6 @@ pub enum Error {
     #[cfg(target_arch = "x86_64")]
     /// Failed to get KVM vcpu xsave.
     VcpuGetXsave(kvm_ioctls::Error),
-    /// Cannot run the VCPUs.
-    VcpuRun(kvm_ioctls::Error),
     #[cfg(target_arch = "x86_64")]
     /// Failed to set KVM vcpu cpuid.
     VcpuSetCpuid(kvm_ioctls::Error),
@@ -271,10 +255,8 @@ impl Display for Error {
             #[cfg(target_arch = "x86_64")]
             CpuId(e) => write!(f, "Cpuid error: {e:?}"),
             CreateGuestMemfd(e) => write!(f, "Unable to create KVM guest_memfd: {e:?}"),
-            GuestMemoryMmap(e) => write!(f, "Guest memory error: {e:?}"),
             #[cfg(target_arch = "x86_64")]
             GuestMSRs(e) => write!(f, "Retrieving supported guest MSRs fails: {e:?}"),
-            HTNotInitialized => write!(f, "Hyperthreading flag is not initialized"),
             #[cfg(feature = "tee")]
             HypercallExitEnable(e) => write!(f, "Unable to enable KVM hypercall exits: {e}"),
             KvmApiVersion(v) => {
@@ -283,7 +265,6 @@ impl Display for Error {
             KvmCap(cap) => write!(f, "Missing KVM capabilities: {cap:?}"),
             #[cfg(feature = "amd-sev")]
             KvmCpuId(e) => write!(f, "Cannot read CPUID entries from KVM: {e}"),
-            VcpuCountNotInitialized => write!(f, "vCPU count is not initialized"),
             VmFd(e) => write!(f, "Cannot open the VM file descriptor: {e}"),
             VcpuFd(e) => write!(f, "Cannot open the VCPU file descriptor: {e}"),
             VmSetup(e) => write!(f, "Cannot configure the microvm: {e}"),
@@ -292,7 +273,6 @@ impl Display for Error {
                 f,
                 "Failed to set vm APIC bus clock rate (in nanoseconds): {e}"
             ),
-            VcpuRun(e) => write!(f, "Cannot run the VCPUs: {e}"),
             NotEnoughMemorySlots => write!(
                 f,
                 "The number of configured slots is bigger than the maximum reported by KVM"
@@ -304,7 +284,6 @@ impl Display for Error {
             ),
             SetMemoryAttributes(e) => write!(f, "Cannot set memory region attributes: {e}"),
             SetUserMemoryRegion(e) => write!(f, "Cannot set the memory regions: {e}"),
-            ShmMmap(e) => write!(f, "Error creating memory map for SHM region: {e}"),
             #[cfg(feature = "amd-sev")]
             SnpSecVirtInit(e) => write!(
                 f,
@@ -326,13 +305,6 @@ impl Display for Error {
                 f,
                 "Error preparing the VM for Trust Domain Extensions (TDX): {e:?}"
             ),
-            #[cfg(feature = "tdx")]
-            TdxSecVirtInitVcpu => write!(
-                f,
-                "Error initializing vCPU for Trust Domain Extensions (TDX)"
-            ),
-            #[cfg(feature = "tee")]
-            MissingTeeConfig => write!(f, "Missing TEE configuration"),
             #[cfg(target_arch = "x86_64")]
             MSRSConfiguration(e) => write!(f, "Error configuring the MSR registers: {e:?}"),
             #[cfg(target_arch = "aarch64")]
@@ -356,7 +328,6 @@ impl Display for Error {
                 f,
                 "Error configuring the floating point related registers: {e:?}"
             ),
-            Irq(e) => write!(f, "Cannot configure the IRQ: {e}"),
             #[cfg(target_arch = "x86_64")]
             VcpuGetDebugRegs(e) => write!(f, "Failed to get KVM vcpu debug regs: {e}"),
             #[cfg(target_arch = "x86_64")]
@@ -430,6 +401,7 @@ pub type Result<T> = result::Result<T, Error>;
 
 #[cfg(feature = "tee")]
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct MeasuredRegion {
     pub guest_addr: u64,
     pub host_addr: u64,
@@ -505,9 +477,7 @@ pub struct Vm {
     #[cfg(feature = "tdx")]
     tdx: Option<IntelTdx>,
 
-    #[cfg(feature = "tee")]
-    pub tee_config: Tee,
-
+    #[cfg(all(feature = "tee", target_arch = "x86_64"))]
     pub guest_memfds: Vec<(Range<u64>, RawFd)>,
 }
 
@@ -533,7 +503,6 @@ impl Vm {
             supported_cpuid,
             #[cfg(target_arch = "x86_64")]
             supported_msrs,
-            guest_memfds: Vec::new(),
         })
     }
 
@@ -571,7 +540,6 @@ impl Vm {
             supported_cpuid,
             supported_msrs,
             tee,
-            tee_config: tee_config.tee,
             guest_memfds: Vec::new(),
         })
     }
@@ -579,7 +547,7 @@ impl Vm {
     #[cfg(feature = "tdx")]
     pub fn new(
         kvm: &Kvm,
-        tee_config: &TeeConfig,
+        _tee_config: &TeeConfig,
         _sender: crossbeam_channel::Sender<WorkerMessage>,
     ) -> Result<Self> {
         // create fd for interacting with kvm-vm specific functions
@@ -616,7 +584,6 @@ impl Vm {
             supported_cpuid,
             supported_msrs,
             tdx: Some(IntelTdx::new()),
-            tee_config: tee_config.tee,
             guest_memfds: Vec::new(),
         })
     }
@@ -655,6 +622,7 @@ impl Vm {
         Ok(())
     }
 
+    #[cfg(all(feature = "tee", target_arch = "x86_64"))]
     pub fn guest_memfd_get(&self, gpa: u64) -> Option<(RawFd, u64)> {
         for (range, rawfd) in self.guest_memfds.iter() {
             if range.contains(&gpa) {
@@ -1774,6 +1742,7 @@ pub enum VcpuEvent {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 /// List of responses that the Vcpu reports.
 pub enum VcpuResponse {
     /// Vcpu is paused.

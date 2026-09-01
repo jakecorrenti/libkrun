@@ -4,8 +4,10 @@ use arch::ArchMemoryInfo;
 use vm_memory::GuestAddress;
 use vmm_sys_util::align_upwards;
 
+#[allow(unused)]
 #[derive(Debug)]
 pub enum Error {
+    #[cfg(feature = "gpu")]
     DuplicatedGpuRegion,
     OutOfSpace,
 }
@@ -17,7 +19,9 @@ pub struct ShmRegion {
 }
 
 pub struct ShmManager {
+    #[allow(unused)]
     next_guest_addr: u64,
+    #[allow(unused)]
     page_size: usize,
     fs_regions: BTreeMap<usize, ShmRegion>,
     gpu_region: Option<ShmRegion>,
@@ -66,6 +70,7 @@ impl ShmManager {
         self.gpu_region.as_ref()
     }
 
+    #[allow(unused)]
     fn create_region(&mut self, size: usize) -> Result<ShmRegion, Error> {
         let size = align_upwards!(size, self.page_size);
 
@@ -82,6 +87,7 @@ impl ShmManager {
         }
     }
 
+    #[cfg(feature = "gpu")]
     pub fn create_gpu_region(&mut self, size: usize) -> Result<(), Error> {
         if self.gpu_region.is_some() {
             Err(Error::DuplicatedGpuRegion)

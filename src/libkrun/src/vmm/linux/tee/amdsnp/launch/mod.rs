@@ -186,14 +186,8 @@ pub enum PageType {
     /// A normal data page.
     Normal = 0x1,
 
-    /// A VMSA page.
-    Vmsa = 0x2,
-
     /// A page full of zeroes.
     Zero = 0x3,
-
-    /// A page that is encrypted but not measured
-    Unmeasured = 0x4,
 
     /// A page for the firmware to store secrets for the guest.
     Secrets = 0x5,

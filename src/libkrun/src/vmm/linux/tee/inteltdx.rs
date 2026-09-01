@@ -4,6 +4,7 @@ use tdx::launch::{self, Launcher};
 use std::os::unix::io::AsRawFd;
 
 #[derive(Debug)]
+#[allow(unused)]
 pub enum Error {
     GetCapabilities(launch::Error),
     InitVm(launch::Error),

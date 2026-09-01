@@ -48,12 +48,6 @@ pub struct BlockBuilder {
 }
 
 impl BlockBuilder {
-    pub fn new() -> Self {
-        Self {
-            list: VecDeque::<Arc<Mutex<Block>>>::new(),
-        }
-    }
-
     pub fn insert(&mut self, config: BlockDeviceConfig) -> Result<()> {
         let block_dev = Arc::new(Mutex::new(Self::create_block(config)?));
         self.list.push_back(block_dev);

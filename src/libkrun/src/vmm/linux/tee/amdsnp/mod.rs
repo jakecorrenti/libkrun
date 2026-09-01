@@ -17,8 +17,8 @@ use vm_memory::{
 };
 
 #[derive(Debug)]
+#[allow(unused)]
 pub enum Error {
-    CpuIdWrite,
     CpuIdFull,
     CreateLauncher(FirmwareError),
     GuestMemoryWrite(vm_memory::GuestMemoryError),

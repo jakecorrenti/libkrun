@@ -5,6 +5,7 @@ use std::fmt::{Display, Formatter, Result};
 
 /// Data structure holding the attributes read from the `libkrunfw` kernel config.
 #[derive(Debug, Default)]
+#[allow(unused)]
 pub struct KernelBundle {
     pub host_addr: u64,
     pub guest_addr: u64,
@@ -19,8 +20,6 @@ pub enum KernelBundleError {
     InvalidGuestAddress,
     /// Host address is zero or not page-aligned.
     InvalidHostAddress,
-    /// Kernel size is zero or not a multiple of the page size.
-    InvalidSize,
 }
 
 impl Display for KernelBundleError {
@@ -29,12 +28,12 @@ impl Display for KernelBundleError {
         match *self {
             InvalidGuestAddress => write!(f, "Guest address is not page-aligned"),
             InvalidHostAddress => write!(f, "Host address is zero or not page-aligned"),
-            InvalidSize => write!(f, "Kernel size is zero or not a multiple of the page size"),
         }
     }
 }
 
 /// Data structure holding the attributes read from the `libkrunfw` qboot config.
+#[cfg(feature = "tee")]
 #[derive(Debug, Default)]
 pub struct QbootBundle {
     pub host_addr: u64,
@@ -42,12 +41,14 @@ pub struct QbootBundle {
 }
 
 /// Structure used to specify the parameters for the `libkrunfw` qboot bundle.
+#[cfg(feature = "tee")]
 #[derive(Debug)]
 pub enum QbootBundleError {
     /// Qboot binary is not 64K long.
     InvalidSize,
 }
 
+#[cfg(feature = "tee")]
 impl Display for QbootBundleError {
     fn fmt(&self, f: &mut Formatter) -> Result {
         use self::QbootBundleError::*;
@@ -58,6 +59,7 @@ impl Display for QbootBundleError {
 }
 
 /// Data structure holding the attributes read from the `libkrunfw` initrd config.
+#[cfg(feature = "tee")]
 #[derive(Debug, Default)]
 pub struct InitrdBundle {
     pub host_addr: u64,

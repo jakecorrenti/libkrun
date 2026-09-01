@@ -56,14 +56,6 @@ pub struct VsockBuilder {
 }
 
 impl VsockBuilder {
-    /// Creates an empty Vsock.
-    pub fn new() -> Self {
-        Self {
-            inner: None,
-            tsi_flags: TsiFlags::empty(),
-        }
-    }
-
     /// Inserts a Vsock in the store.
     /// If an entry already exists, it will overwrite it.
     pub fn insert(&mut self, cfg: VsockDeviceConfig) -> Result<()> {
@@ -133,7 +125,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_vsock_insert() {
-        let mut store = VsockBuilder::new();
+        let mut store = VsockBuilder::default();
         let tmp_sock_file = TempSockFile::new(TempFile::new().unwrap());
         let mut vsock_config = default_config(&tmp_sock_file);
 

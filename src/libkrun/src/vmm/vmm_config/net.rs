@@ -25,8 +25,6 @@ pub struct NetworkInterfaceConfig {
 pub enum NetworkInterfaceError {
     /// Could not create Network Device.
     CreateNetworkDevice(devices::virtio::net::Error),
-    /// Couldn't find the interface to update (patch).
-    DeviceIdNotFound,
 }
 
 impl fmt::Display for NetworkInterfaceError {
@@ -34,7 +32,6 @@ impl fmt::Display for NetworkInterfaceError {
         use self::NetworkInterfaceError::*;
         match *self {
             CreateNetworkDevice(ref e) => write!(f, "Could not create Network Device: {e:?}"),
-            DeviceIdNotFound => write!(f, "Invalid interface ID - not found."),
         }
     }
 }
@@ -48,14 +45,6 @@ pub struct NetBuilder {
 }
 
 impl NetBuilder {
-    /// Creates an empty list of Network Devices.
-    pub fn new() -> Self {
-        NetBuilder {
-            // List of built network devices.
-            list: VecDeque::new(),
-        }
-    }
-
     pub fn insert(&mut self, config: NetworkInterfaceConfig) -> Result<()> {
         let net_dev = Arc::new(Mutex::new(Self::create_net(config)?));
         self.list.push_back(net_dev);

@@ -9,11 +9,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::{fmt, io};
 
+use devices::DeviceType;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use devices::fdt::DeviceInfoForFDT;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use devices::legacy::IrqChip;
-use devices::{BusDevice, DeviceType};
 use kernel::cmdline as kernel_cmdline;
 use kvm_ioctls::{IoEventAddress, VmFd};
 #[cfg(target_arch = "aarch64")]
@@ -21,6 +21,7 @@ use utils::eventfd::EventFd;
 
 /// Errors for MMIO device manager.
 #[allow(clippy::enum_variant_names)]
+#[allow(unused)]
 #[derive(Debug)]
 pub enum Error {
     /// Failed to create MmioTransport
@@ -37,10 +38,6 @@ pub enum Error {
     RegisterIoEvent(kvm_ioctls::Error),
     /// Registering an IRQ FD failed.
     RegisterIrqFd(kvm_ioctls::Error),
-    /// The device couldn't be found
-    DeviceNotFound,
-    /// Failed to update the mmio device.
-    UpdateFailed,
     /// Failed to create vhost-user device.
     #[cfg(all(feature = "vhost-user", target_os = "linux"))]
     VhostUserDevice(io::Error),
@@ -60,8 +57,6 @@ impl fmt::Display for Error {
             Error::IrqsExhausted => write!(f, "no more IRQs are available"),
             Error::RegisterIoEvent(ref e) => write!(f, "failed to register IO event: {e}"),
             Error::RegisterIrqFd(ref e) => write!(f, "failed to register irqfd: {e}"),
-            Error::DeviceNotFound => write!(f, "the device couldn't be found"),
-            Error::UpdateFailed => write!(f, "failed to update the mmio device"),
             #[cfg(all(feature = "vhost-user", target_os = "linux"))]
             Error::VhostUserDevice(ref e) => write!(f, "failed to create vhost-user device: {e}"),
         }
@@ -278,26 +273,11 @@ impl MMIODeviceManager {
     pub fn get_device_info(&self) -> &HashMap<(DeviceType, String), MMIODeviceInfo> {
         &self.id_to_dev_info
     }
-
-    /// Gets the the specified device.
-    pub fn get_device(
-        &self,
-        device_type: DeviceType,
-        device_id: &str,
-    ) -> Option<&Mutex<dyn BusDevice>> {
-        if let Some(dev_info) = self
-            .id_to_dev_info
-            .get(&(device_type, device_id.to_string()))
-            && let Some((_, device)) = self.bus.get_device(dev_info.addr)
-        {
-            return Some(device);
-        }
-        None
-    }
 }
 
 /// Private structure for storing information about the MMIO device registered at some address on the bus.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct MMIODeviceInfo {
     addr: u64,
     _irq: u32,
@@ -518,10 +498,6 @@ mod tests {
             ),
         );
         assert_eq!(
-            format!("{}", Error::UpdateFailed),
-            "failed to update the mmio device"
-        );
-        assert_eq!(
             format!("{}", Error::BusError(devices::BusError::Overlap)),
             format!(
                 "failed to perform bus operation: {}",
@@ -564,11 +540,6 @@ mod tests {
             type_id,
             &id,
         ) {
-            assert!(
-                device_manager
-                    .get_device(DeviceType::Virtio(type_id), &id)
-                    .is_some()
-            );
             assert_eq!(
                 addr,
                 device_manager.id_to_dev_info[&(DeviceType::Virtio(type_id), id.clone())].addr
@@ -578,11 +549,5 @@ mod tests {
                 device_manager.id_to_dev_info[&(DeviceType::Virtio(type_id), id.clone())]._irq
             );
         }
-        let id = "bar";
-        assert!(
-            device_manager
-                .get_device(DeviceType::Virtio(type_id), id)
-                .is_none()
-        );
     }
 }

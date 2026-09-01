@@ -3,10 +3,6 @@
 
 use std::fmt;
 
-/// Firecracker aims to support small scale workloads only, so limit the maximum
-/// vCPUs supported.
-pub const MAX_SUPPORTED_VCPUS: u8 = 32;
-
 /// Errors associated with configuring the microVM.
 #[derive(Debug, Eq, PartialEq)]
 pub enum VmConfigError {
@@ -75,6 +71,7 @@ impl fmt::Display for VmConfig {
 /// Template types available for configuring the CPU features that map
 /// to EC2 instances.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(unused)]
 pub enum CpuFeaturesTemplate {
     /// C3 Template.
     C3,

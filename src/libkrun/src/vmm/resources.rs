@@ -28,7 +28,7 @@ use crate::vmm::vmm_config::fs::*;
 #[cfg(feature = "tee")]
 use crate::vmm::vmm_config::kernel_bundle::{InitrdBundle, QbootBundle, QbootBundleError};
 use crate::vmm::vmm_config::kernel_bundle::{KernelBundle, KernelBundleError};
-use crate::vmm::vmm_config::kernel_cmdline::{KernelCmdlineConfig, KernelCmdlineConfigError};
+use crate::vmm::vmm_config::kernel_cmdline::KernelCmdlineConfig;
 use crate::vmm::vmm_config::machine_config::{VmConfig, VmConfigError};
 #[cfg(feature = "net")]
 use crate::vmm::vmm_config::net::{NetBuilder, NetworkInterfaceConfig, NetworkInterfaceError};
@@ -66,11 +66,9 @@ pub struct VhostUserDeviceConfig {
 
 /// Errors encountered when configuring microVM resources.
 #[derive(Debug)]
+#[allow(unused)]
+#[allow(clippy::enum_variant_names)]
 pub enum Error {
-    /// JSON is invalid.
-    InvalidJson,
-    /// Boot source configuration error.
-    KernelCmdline(KernelCmdlineConfigError),
     /// Error opening TEE config file.
     #[cfg(feature = "tee")]
     OpenTeeConfig(std::io::Error),
@@ -79,8 +77,6 @@ pub enum Error {
     ParseTeeConfig(serde_json::Error),
     /// microVM vCpus or memory configuration error.
     VmConfig(VmConfigError),
-    /// Vsock device configuration error.
-    VsockDevice(VsockConfigError),
 }
 
 #[cfg(feature = "tee")]
@@ -240,6 +236,7 @@ pub struct VmResources {
     /// Virtio consoles to attach to the guest
     pub virtio_consoles: Vec<VirtioConsoleConfigMode>,
     /// Enable the embedded dhcp client in init.c
+    #[cfg(feature = "net")]
     pub dhcp_client: bool,
 }
 
@@ -302,16 +299,8 @@ impl VmResources {
     }
 
     /// Set the guest kernel cmdline configuration.
-    pub fn set_kernel_cmdline(
-        &mut self,
-        kernel_cmdline_cfg: KernelCmdlineConfig,
-    ) -> Result<KernelCmdlineConfigError> {
+    pub fn set_kernel_cmdline(&mut self, kernel_cmdline_cfg: KernelCmdlineConfig) {
         self.kernel_cmdline = kernel_cmdline_cfg;
-        Ok(())
-    }
-
-    pub fn kernel_bundle(&self) -> Option<&KernelBundle> {
-        self.kernel_bundle.as_ref()
     }
 
     pub fn set_kernel_bundle(&mut self, kernel_bundle: KernelBundle) -> Result<KernelBundleError> {
@@ -335,17 +324,14 @@ impl VmResources {
         self.external_kernel.as_ref()
     }
 
+    #[cfg(not(feature = "tee"))]
     pub fn set_external_kernel(&mut self, external_kernel: ExternalKernel) {
         self.external_kernel = Some(external_kernel);
     }
 
+    #[cfg(not(feature = "tee"))]
     pub fn set_firmware_config(&mut self, firmware_config: FirmwareConfig) {
         self.firmware_config = Some(firmware_config);
-    }
-
-    #[cfg(feature = "tee")]
-    pub fn qboot_bundle(&self) -> Option<&QbootBundle> {
-        self.qboot_bundle.as_ref()
     }
 
     #[cfg(feature = "tee")]
@@ -356,11 +342,6 @@ impl VmResources {
 
         self.qboot_bundle = Some(qboot_bundle);
         Ok(())
-    }
-
-    #[cfg(feature = "tee")]
-    pub fn initrd_bundle(&self) -> Option<&InitrdBundle> {
-        self.initrd_bundle.as_ref()
     }
 
     #[cfg(feature = "tee")]
@@ -375,6 +356,7 @@ impl VmResources {
     }
 
     #[cfg(not(feature = "tee"))]
+    #[cfg_attr(feature = "aws-nitro", allow(unused))]
     pub fn add_fs_device(&mut self, config: FsDeviceConfig) {
         self.fs.push(config)
     }
@@ -479,6 +461,7 @@ mod tests {
             serial_consoles: Vec::new(),
             virtio_consoles: Vec::new(),
             kernel_console: None,
+            #[cfg(feature = "net")]
             dhcp_client: false,
         }
     }

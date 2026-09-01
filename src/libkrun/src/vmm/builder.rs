@@ -131,6 +131,7 @@ use arch::x86_64::layout::AP_TRAMPOLINE_START;
 
 /// Errors associated with starting the instance.
 #[derive(Debug)]
+#[allow(unused)]
 pub enum StartMicrovmError {
     /// Unable to attach block device to Vmm.
     AttachBlockDevice(io::Error),
@@ -219,6 +220,7 @@ pub enum StartMicrovmError {
     /// Cannot register an EventHandler.
     RegisterEvent(EventManagerError),
     /// Cannot initialize a MMIO Fs Device or add ad device to the MMIO Bus.
+    #[cfg_attr(feature = "aws-nitro", allow(unused))]
     RegisterFsDevice(device_manager::mmio::Error),
     // Cannot initialize a MMIO Fs Device or add ad device to the MMIO Bus.
     RegisterConsoleDevice(device_manager::mmio::Error),
@@ -246,6 +248,7 @@ pub enum StartMicrovmError {
     /// Error creating an SHM region.
     ShmCreate(device_manager::shm::Error),
     /// Error obtaining the host address of an SHM region.
+    #[cfg_attr(feature = "aws-nitro", allow(unused))]
     ShmHostAddr(vm_memory::GuestMemoryError),
     /// Error in TD-Shim firmware handling.
     #[cfg(feature = "tdx")]
@@ -1194,8 +1197,6 @@ pub fn build_microvm(
         exit_code: exit_code.clone(),
         vm,
         mmio_device_manager,
-        #[cfg(target_arch = "x86_64")]
-        pio_device_manager,
         #[cfg(target_os = "macos")]
         vm_ctl_tx,
         #[cfg(target_os = "macos")]
@@ -1874,6 +1875,7 @@ pub fn create_guest_memory(
         _ => arch::arch_memory_regions(mem_size, 0, _firmware_size),
     };
 
+    #[allow(unused_mut)]
     let mut shm_manager = ShmManager::new(&arch_mem_info);
 
     #[cfg(not(feature = "tee"))]
@@ -1884,6 +1886,7 @@ pub fn create_guest_memory(
                 .map_err(StartMicrovmError::ShmCreate)?;
         }
     }
+    #[cfg(feature = "gpu")]
     if vm_resources.gpu_virgl_flags.is_some() {
         let size = vm_resources.gpu_shm_size.unwrap_or(1 << 33);
         shm_manager
@@ -3122,7 +3125,7 @@ pub mod tests {
         let err = CreateRateLimiter(io::Error::from_raw_os_error(0));
         let _ = format!("{err}{err:?}");
 
-        let err = Internal(Error::Serial(io::Error::from_raw_os_error(0)));
+        let err = Internal(Error::EventFd(io::Error::from_raw_os_error(0)));
         let _ = format!("{err}{err:?}");
 
         let err = InvalidKernelBundle(vm_memory::mmap::MmapRegionError::InvalidPointer);

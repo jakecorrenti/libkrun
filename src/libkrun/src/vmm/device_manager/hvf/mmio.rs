@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::{fmt, io};
 
+use devices::DeviceType;
 use devices::fdt::DeviceInfoForFDT;
 use devices::legacy::IrqChip;
-use devices::{BusDevice, DeviceType};
 use kernel::cmdline as kernel_cmdline;
 use polly::event_manager::EventManager;
 #[cfg(target_arch = "aarch64")]
@@ -33,14 +33,6 @@ pub enum Error {
     EventFd(io::Error),
     /// No more IRQs are available.
     IrqsExhausted,
-    /// Registering an IO Event failed.
-    RegisterIoEvent,
-    /// Registering an IRQ FD failed.
-    RegisterIrqFd,
-    /// The device couldn't be found
-    DeviceNotFound,
-    /// Failed to update the mmio device.
-    UpdateFailed,
 }
 
 impl fmt::Display for Error {
@@ -55,10 +47,6 @@ impl fmt::Display for Error {
             }
             Error::EventFd(ref e) => write!(f, "failed to create or clone event descriptor: {e}"),
             Error::IrqsExhausted => write!(f, "no more IRQs are available"),
-            Error::RegisterIoEvent => write!(f, "failed to register IO event"),
-            Error::RegisterIrqFd => write!(f, "failed to register irqfd"),
-            Error::DeviceNotFound => write!(f, "the device couldn't be found"),
-            Error::UpdateFailed => write!(f, "failed to update the mmio device"),
         }
     }
 }
@@ -282,22 +270,6 @@ impl MMIODeviceManager {
     pub fn get_device_info(&self) -> &HashMap<(DeviceType, String), MMIODeviceInfo> {
         &self.id_to_dev_info
     }
-
-    /// Gets the specified device.
-    pub fn get_device(
-        &self,
-        device_type: DeviceType,
-        device_id: &str,
-    ) -> Option<&Mutex<dyn BusDevice>> {
-        if let Some(dev_info) = self
-            .id_to_dev_info
-            .get(&(device_type, device_id.to_string()))
-            && let Some((_, device)) = self.bus.get_device(dev_info.addr)
-        {
-            return Some(device);
-        }
-        None
-    }
 }
 
 /// Private structure for storing information about the MMIO device registered at some address on the bus.
@@ -505,10 +477,6 @@ mod tests {
             ),
         );
         assert_eq!(
-            format!("{}", Error::UpdateFailed),
-            "failed to update the mmio device"
-        );
-        assert_eq!(
             format!("{}", Error::BusError(devices::BusError::Overlap)),
             format!(
                 "failed to perform bus operation: {}",
@@ -518,14 +486,6 @@ mod tests {
         assert_eq!(
             format!("{}", Error::IrqsExhausted),
             "no more IRQs are available"
-        );
-        assert_eq!(
-            format!("{}", Error::RegisterIoEvent),
-            "failed to register IO event"
-        );
-        assert_eq!(
-            format!("{}", Error::RegisterIrqFd),
-            "failed to register irqfd"
         );
     }
 
@@ -545,11 +505,6 @@ mod tests {
         if let Ok(addr) =
             device_manager.register_virtio_device(guest_mem, dummy, &mut cmdline, type_id, &id)
         {
-            assert!(
-                device_manager
-                    .get_device(DeviceType::Virtio(type_id), &id)
-                    .is_some()
-            );
             assert_eq!(
                 addr,
                 device_manager.id_to_dev_info[&(DeviceType::Virtio(type_id), id.clone())].addr
@@ -559,11 +514,5 @@ mod tests {
                 device_manager.id_to_dev_info[&(DeviceType::Virtio(type_id), id.clone())].irq
             );
         }
-        let id = "bar";
-        assert!(
-            device_manager
-                .get_device(DeviceType::Virtio(type_id), &id)
-                .is_none()
-        );
     }
 }

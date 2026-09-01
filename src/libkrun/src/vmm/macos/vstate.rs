@@ -28,6 +28,7 @@ use vm_memory::{
 
 /// Errors associated with the wrappers over KVM ioctls.
 #[derive(Debug)]
+#[allow(unused)]
 pub enum Error {
     /// Invalid guest memory configuration.
     GuestMemoryMmap(GuestMemoryError),
@@ -104,10 +105,6 @@ impl Vm {
         let hvf_vm = HvfVm::new(nested_enabled).map_err(Error::VmSetup)?;
 
         Ok(Vm { hvf_vm })
-    }
-
-    pub fn hvf_vm(&self) -> &HvfVm {
-        &self.hvf_vm
     }
 
     /// Initializes the guest memory.

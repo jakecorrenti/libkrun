@@ -3077,9 +3077,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         epilog: None,
     };
 
-    if ctx_cfg.vmr.set_kernel_cmdline(kernel_cmdline).is_err() {
-        return -libc::EINVAL;
-    }
+    ctx_cfg.vmr.set_kernel_cmdline(kernel_cmdline);
 
     match &ctx_cfg.vsock_config {
         VsockConfig::Disabled => (),
