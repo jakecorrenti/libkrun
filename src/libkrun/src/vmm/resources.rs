@@ -18,22 +18,22 @@ use utils::windows::SendHandle;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "blk")]
-use crate::vmm_config::block::{BlockBuilder, BlockConfigError, BlockDeviceConfig};
-use crate::vmm_config::external_kernel::ExternalKernel;
-use crate::vmm_config::firmware::FirmwareConfig;
+use crate::vmm::vmm_config::block::{BlockBuilder, BlockConfigError, BlockDeviceConfig};
+use crate::vmm::vmm_config::external_kernel::ExternalKernel;
+use crate::vmm::vmm_config::firmware::FirmwareConfig;
 #[cfg(feature = "tdx")]
-use crate::vmm_config::firmware::TeeFirmwareConfig;
+use crate::vmm::vmm_config::firmware::TeeFirmwareConfig;
 #[cfg(not(feature = "tee"))]
-use crate::vmm_config::fs::*;
+use crate::vmm::vmm_config::fs::*;
 #[cfg(feature = "tee")]
-use crate::vmm_config::kernel_bundle::{InitrdBundle, QbootBundle, QbootBundleError};
-use crate::vmm_config::kernel_bundle::{KernelBundle, KernelBundleError};
-use crate::vmm_config::kernel_cmdline::{KernelCmdlineConfig, KernelCmdlineConfigError};
-use crate::vmm_config::machine_config::{VmConfig, VmConfigError};
+use crate::vmm::vmm_config::kernel_bundle::{InitrdBundle, QbootBundle, QbootBundleError};
+use crate::vmm::vmm_config::kernel_bundle::{KernelBundle, KernelBundleError};
+use crate::vmm::vmm_config::kernel_cmdline::{KernelCmdlineConfig, KernelCmdlineConfigError};
+use crate::vmm::vmm_config::machine_config::{VmConfig, VmConfigError};
 #[cfg(feature = "net")]
-use crate::vmm_config::net::{NetBuilder, NetworkInterfaceConfig, NetworkInterfaceError};
-use crate::vmm_config::vsock::*;
-use crate::vstate::VcpuConfig;
+use crate::vmm::vmm_config::net::{NetBuilder, NetworkInterfaceConfig, NetworkInterfaceError};
+use crate::vmm::vmm_config::vsock::*;
+use crate::vmm::vstate::VcpuConfig;
 #[cfg(any(feature = "gpu", feature = "vhost-user"))]
 use devices::display::DisplayInfo;
 #[cfg(feature = "tee")]
@@ -435,11 +435,11 @@ impl VmResources {
 
 #[cfg(test)]
 mod tests {
-    use crate::resources::VmResources;
-    use crate::vmm_config::kernel_cmdline::KernelCmdlineConfig;
-    use crate::vmm_config::machine_config::{CpuFeaturesTemplate, VmConfig, VmConfigError};
-    use crate::vmm_config::vsock::tests::{TempSockFile, default_config};
-    use crate::vstate::VcpuConfig;
+    use crate::vmm::resources::VmResources;
+    use crate::vmm::vmm_config::kernel_cmdline::KernelCmdlineConfig;
+    use crate::vmm::vmm_config::machine_config::{CpuFeaturesTemplate, VmConfig, VmConfigError};
+    use crate::vmm::vmm_config::vsock::tests::{TempSockFile, default_config};
+    use crate::vmm::vstate::VcpuConfig;
     use utils::tempfile::TempFile;
 
     fn default_kernel_cmdline() -> KernelCmdlineConfig {
@@ -561,7 +561,7 @@ mod tests {
 #[cfg(all(test, feature = "tdx"))]
 mod tee_firmware_tests {
     use super::*;
-    use crate::vmm_config::firmware::{TeeFirmwareConfig, TeeFirmwareType};
+    use crate::vmm::vmm_config::firmware::{TeeFirmwareConfig, TeeFirmwareType};
     use std::path::PathBuf;
 
     #[test]

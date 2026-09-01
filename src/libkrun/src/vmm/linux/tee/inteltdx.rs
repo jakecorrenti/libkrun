@@ -32,7 +32,7 @@ impl IntelTdx {
     pub fn configure_td_memory(
         &self,
         launcher: &mut Launcher,
-        regions: &Vec<crate::vstate::MeasuredRegion>,
+        regions: &Vec<crate::vmm::vstate::MeasuredRegion>,
     ) -> Result<()> {
         for region in regions {
             let mem_region = tdx::launch::MemRegion::new(

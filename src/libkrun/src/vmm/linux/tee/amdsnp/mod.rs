@@ -5,7 +5,7 @@ use std::{
     slice,
 };
 
-use crate::vstate::MeasuredRegion;
+use crate::vmm::vstate::MeasuredRegion;
 use arch::x86_64::layout::*;
 
 use launch::{error::FirmwareError, firmware::Firmware, *};

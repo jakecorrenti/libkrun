@@ -10,9 +10,6 @@
 //! machine (microVM).
 //#![deny(missing_docs)]
 
-#[macro_use]
-extern crate log;
-
 /// Handles setup and initialization a `Vmm` object.
 pub mod builder;
 pub(crate) mod device_manager;
@@ -27,7 +24,7 @@ pub mod vmm_config;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-use crate::linux::vstate;
+use crate::vmm::linux::vstate;
 #[cfg(target_os = "macos")]
 mod macos;
 mod terminal;
@@ -45,11 +42,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg(target_arch = "x86_64")]
-use crate::device_manager::legacy::PortIODeviceManager;
-use crate::device_manager::mmio::MMIODeviceManager;
+use crate::vmm::device_manager::legacy::PortIODeviceManager;
+use crate::vmm::device_manager::mmio::MMIODeviceManager;
 #[cfg(target_os = "linux")]
-use crate::vstate::VcpuEvent;
-use crate::vstate::{Vcpu, VcpuHandle, VcpuResponse, Vm};
+use crate::vmm::vstate::VcpuEvent;
+use crate::vmm::vstate::{Vcpu, VcpuHandle, VcpuResponse, Vm};
 
 use arch::{ArchMemoryInfo, InitrdConfig};
 #[cfg(target_os = "macos")]
@@ -304,7 +301,7 @@ impl Vmm {
     /// Idempotent: pausing an already-paused VM is a no-op.
     #[cfg(target_os = "macos")]
     pub fn pause(&mut self) -> std::result::Result<(), String> {
-        use crate::vstate::{VcpuEvent, VcpuResponse};
+        use crate::vmm::vstate::{VcpuEvent, VcpuResponse};
         if self.paused {
             return Ok(());
         }
@@ -330,7 +327,7 @@ impl Vmm {
     /// no-op.
     #[cfg(target_os = "macos")]
     pub fn resume(&mut self) -> std::result::Result<(), String> {
-        use crate::vstate::{VcpuEvent, VcpuResponse};
+        use crate::vmm::vstate::{VcpuEvent, VcpuResponse};
         if !self.paused {
             return Ok(());
         }

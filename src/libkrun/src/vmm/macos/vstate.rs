@@ -15,7 +15,7 @@ use std::thread;
 use std::time::Duration;
 
 use super::super::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK};
-use crate::vmm_config::machine_config::CpuFeaturesTemplate;
+use crate::vmm::vmm_config::machine_config::CpuFeaturesTemplate;
 
 use arch::ArchMemoryInfo;
 use crossbeam_channel::{Receiver, Sender, after, select, unbounded};

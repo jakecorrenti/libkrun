@@ -38,8 +38,8 @@ use super::tee::inteltdx::{Error as TdxError, IntelTdx};
 use kbs_types::Tee;
 
 #[cfg(feature = "tee")]
-use crate::resources::TeeConfig;
-use crate::vmm_config::machine_config::CpuFeaturesTemplate;
+use crate::vmm::resources::TeeConfig;
+use crate::vmm::vmm_config::machine_config::CpuFeaturesTemplate;
 #[cfg(target_arch = "x86_64")]
 use cpuid::{VmSpec, c3, filter_cpuid, t2};
 #[cfg(not(feature = "tee"))]
@@ -814,7 +814,7 @@ impl Vm {
     pub fn tdx_secure_virt_prepare_memory(
         &self,
         launcher: &mut tdx::launch::Launcher,
-        regions: &Vec<crate::vstate::MeasuredRegion>,
+        regions: &Vec<crate::vmm::vstate::MeasuredRegion>,
     ) -> Result<()> {
         match &self.tdx {
             Some(t) => t
@@ -1839,11 +1839,11 @@ mod tests {
 
     use super::*;
     #[cfg(target_arch = "aarch64")]
-    use crate::builder::Payload;
+    use crate::vmm::builder::Payload;
     #[cfg(target_arch = "aarch64")]
-    use crate::builder::create_guest_memory;
+    use crate::vmm::builder::create_guest_memory;
     #[cfg(target_arch = "aarch64")]
-    use crate::resources::VmResources;
+    use crate::vmm::resources::VmResources;
     use devices;
     #[cfg(target_arch = "x86_64")]
     use devices::legacy::KvmIoapic;

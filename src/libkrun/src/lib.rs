@@ -1,6 +1,8 @@
 #[macro_use]
 extern crate log;
 
+mod vmm;
+
 use crossbeam_channel::unbounded;
 #[cfg(any(feature = "gpu", feature = "vhost-user"))]
 use devices::display::DisplayInfo;

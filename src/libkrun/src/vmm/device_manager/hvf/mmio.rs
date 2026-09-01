@@ -17,7 +17,7 @@ use polly::event_manager::EventManager;
 #[cfg(target_arch = "aarch64")]
 use utils::eventfd::EventFd;
 
-use crate::vstate::Vm;
+use crate::vmm::vstate::Vm;
 
 /// Errors for MMIO device manager.
 #[allow(clippy::enum_variant_names)]
@@ -63,7 +63,7 @@ impl fmt::Display for Error {
     }
 }
 
-impl From<devices::virtio::CreateMmioTransportError> for crate::device_manager::mmio::Error {
+impl From<devices::virtio::CreateMmioTransportError> for crate::vmm::device_manager::mmio::Error {
     fn from(e: devices::virtio::CreateMmioTransportError) -> Self {
         Self::CreateMmioTransport(e)
     }

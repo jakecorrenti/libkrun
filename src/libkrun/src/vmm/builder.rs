@@ -34,14 +34,14 @@ use windows_sys::Win32::System::Console::{
 use super::{Error, Vmm};
 
 #[cfg(target_arch = "x86_64")]
-use crate::device_manager::legacy::PortIODeviceManager;
-use crate::device_manager::mmio::MMIODeviceManager;
-use crate::resources::{
+use crate::vmm::device_manager::legacy::PortIODeviceManager;
+use crate::vmm::device_manager::mmio::MMIODeviceManager;
+use crate::vmm::resources::{
     DefaultVirtioConsoleConfig, PortConfig, TsiFlags, VirtioConsoleConfigMode, VmResources,
 };
-use crate::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
+use crate::vmm::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
 #[cfg(feature = "net")]
-use crate::vmm_config::net::NetBuilder;
+use crate::vmm::vmm_config::net::NetBuilder;
 #[cfg(target_arch = "x86_64")]
 use devices::legacy::Cmos;
 #[cfg(all(target_os = "linux", target_arch = "riscv64"))]
@@ -65,28 +65,28 @@ use devices::virtio::{MmioTransport, PortDescription, VirtioDevice, Vsock, port_
 #[cfg(feature = "tee")]
 use kbs_types::Tee;
 
-use crate::device_manager;
+use crate::vmm::device_manager;
 #[cfg(feature = "tdx")]
-use crate::linux::tee::tdshim::{self, TdShim};
+use crate::vmm::linux::tee::tdshim::{self, TdShim};
 #[cfg(all(feature = "vhost-user", target_os = "linux"))]
-use crate::resources::VhostUserDeviceConfig;
+use crate::vmm::resources::VhostUserDeviceConfig;
 #[cfg(target_os = "linux")]
-use crate::signal_handler::register_sigint_handler;
+use crate::vmm::signal_handler::register_sigint_handler;
 #[cfg(target_os = "linux")]
-use crate::signal_handler::register_sigwinch_handler;
-use crate::terminal::{term_restore_mode, term_set_raw_mode};
+use crate::vmm::signal_handler::register_sigwinch_handler;
+use crate::vmm::terminal::{term_restore_mode, term_set_raw_mode};
 #[cfg(feature = "blk")]
-use crate::vmm_config::block::BlockBuilder;
+use crate::vmm::vmm_config::block::BlockBuilder;
 #[cfg(feature = "tdx")]
-use crate::vmm_config::firmware::TeeFirmwareType;
+use crate::vmm::vmm_config::firmware::TeeFirmwareType;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-use crate::vmm_config::fs::FsDeviceConfig;
-use crate::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE;
+use crate::vmm::vmm_config::fs::FsDeviceConfig;
+use crate::vmm::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE;
 #[cfg(target_os = "linux")]
-use crate::vstate::KvmContext;
+use crate::vmm::vstate::KvmContext;
 #[cfg(all(target_os = "linux", feature = "tee"))]
-use crate::vstate::MeasuredRegion;
-use crate::vstate::{Error as VstateError, Vcpu, VcpuConfig, Vm};
+use crate::vmm::vstate::MeasuredRegion;
+use crate::vmm::vstate::{Error as VstateError, Vcpu, VcpuConfig, Vm};
 use arch::{ArchMemoryInfo, InitrdConfig};
 use device_manager::shm::ShmManager;
 #[cfg(any(feature = "gpu", feature = "vhost-user"))]
@@ -3025,7 +3025,7 @@ fn attach_input_devices(
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::vmm_config::kernel_bundle::KernelBundle;
+    use crate::vmm::vmm_config::kernel_bundle::KernelBundle;
 
     #[allow(unused)]
     fn default_guest_memory(
@@ -3115,7 +3115,7 @@ pub mod tests {
 
     #[test]
     fn test_error_messages() {
-        use crate::builder::StartMicrovmError::*;
+        use crate::vmm::builder::StartMicrovmError::*;
         let err = AttachBlockDevice(io::Error::from_raw_os_error(0));
         let _ = format!("{err}{err:?}");
 

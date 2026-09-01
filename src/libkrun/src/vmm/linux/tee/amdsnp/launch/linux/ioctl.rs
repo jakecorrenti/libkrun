@@ -5,7 +5,7 @@
 
 use crate::impl_const_id;
 
-use crate::linux::tee::amdsnp::launch::{error::FirmwareError, linux::snp};
+use crate::vmm::linux::tee::amdsnp::launch::{error::FirmwareError, linux::snp};
 
 use std::{
     marker::PhantomData,

@@ -15,7 +15,6 @@ members = [
     "src/arch",
     "src/hvf",
     "src/devices",
-    "src/vmm",
     "src/aws_nitro",
     "src/whp",
 ]
