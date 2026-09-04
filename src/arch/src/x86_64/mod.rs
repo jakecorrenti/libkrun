@@ -303,8 +303,10 @@ pub fn configure_system(
     num_cpus: u8,
     pvh: bool,
     virtio_mmio_devices: &[(u64, u32)],
+    virtio_pci: bool,
 ) -> super::Result<()> {
-    acpi::setup_acpi(guest_mem, num_cpus, virtio_mmio_devices).map_err(Error::AcpiSetup)?;
+    acpi::setup_acpi(guest_mem, num_cpus, virtio_mmio_devices, virtio_pci)
+        .map_err(Error::AcpiSetup)?;
 
     if pvh {
         #[cfg(all(not(feature = "tee"), target_os = "linux"))]
@@ -600,7 +602,8 @@ mod tests {
         let no_vcpus = 4;
         let gm = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let info = ArchMemoryInfo::default();
-        let config_err = configure_system(&gm, &info, GuestAddress(0), 0, &None, 1, false, &[]);
+        let config_err =
+            configure_system(&gm, &info, GuestAddress(0), 0, &None, 1, false, &[], false);
         assert!(config_err.is_err());
 
         // Now assigning some memory that falls before the 32bit memory hole.
@@ -617,6 +620,7 @@ mod tests {
             no_vcpus,
             false,
             &[],
+            false,
         )
         .unwrap();
 
@@ -634,6 +638,7 @@ mod tests {
             no_vcpus,
             false,
             &[],
+            false,
         )
         .unwrap();
 
@@ -651,6 +656,7 @@ mod tests {
             no_vcpus,
             false,
             &[],
+            false,
         )
         .unwrap();
     }
