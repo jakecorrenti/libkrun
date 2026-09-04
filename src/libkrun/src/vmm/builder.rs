@@ -932,6 +932,7 @@ pub fn build_microvm(
                     .unwrap() as u64,
                 size: (arch::x86_64::layout::HIMEM_START - arch::x86_64::layout::RSDP_ADDR)
                     as usize,
+                attributes: 0,
             },
         ]
     };

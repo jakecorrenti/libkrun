@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::{fmt, io};
 
-use devices::{BusDevice, DeviceType};
+use devices::DeviceType;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use devices::fdt::DeviceInfoForFDT;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
@@ -22,6 +22,7 @@ use utils::eventfd::EventFd;
 
 /// Errors for MMIO device manager.
 #[allow(clippy::enum_variant_names)]
+#[allow(unused)]
 #[derive(Debug)]
 pub enum Error {
     /// Failed to create MmioTransport
@@ -36,10 +37,6 @@ pub enum Error {
     RegisterIoEvent(kvm_ioctls::Error),
     /// Registering an IRQ FD failed.
     RegisterIrqFd(kvm_ioctls::Error),
-    /// The device couldn't be found
-    DeviceNotFound,
-    /// Failed to update the mmio device.
-    UpdateFailed,
     /// Failed to insert a device in the kernel command line.
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     Cmdline(kernel_cmdline::Error),
@@ -59,8 +56,6 @@ impl fmt::Display for Error {
             Error::IrqsExhausted => write!(f, "no more IRQs are available"),
             Error::RegisterIoEvent(ref e) => write!(f, "failed to register IO event: {e}"),
             Error::RegisterIrqFd(ref e) => write!(f, "failed to register irqfd: {e}"),
-            Error::DeviceNotFound => write!(f, "the device couldn't be found"),
-            Error::UpdateFailed => write!(f, "failed to update the mmio device"),
             #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
             Error::Cmdline(ref e) => {
                 write!(f, "failed to insert device in kernel command line: {e}")
@@ -259,22 +254,6 @@ impl MMIODeviceManager {
     /// Gets the information of the devices registered up to some point in time.
     pub fn get_device_info(&self) -> &HashMap<(DeviceType, String), MMIODeviceInfo> {
         &self.id_to_dev_info
-    }
-
-    /// Gets the the specified device.
-    pub fn get_device(
-        &self,
-        device_type: DeviceType,
-        device_id: &str,
-    ) -> Option<&Mutex<dyn BusDevice>> {
-        if let Some(dev_info) = self
-            .id_to_dev_info
-            .get(&(device_type, device_id.to_string()))
-            && let Some((_, device)) = self.bus.get_device(dev_info.addr)
-        {
-            return Some(device);
-        }
-        None
     }
 
     /// Gets the MMIO base address and IRQ for all registered virtio devices.
@@ -523,11 +502,6 @@ mod tests {
         if let Ok(addr) =
             device_manager.register_virtio_device(vm.fd(), guest_mem, dummy, type_id, &id)
         {
-            assert!(
-                device_manager
-                    .get_device(DeviceType::Virtio(type_id), &id)
-                    .is_some()
-            );
             assert_eq!(
                 addr,
                 device_manager.id_to_dev_info[&(DeviceType::Virtio(type_id), id.clone())].addr
@@ -537,12 +511,6 @@ mod tests {
                 device_manager.id_to_dev_info[&(DeviceType::Virtio(type_id), id.clone())]._irq
             );
         }
-        let id = "bar";
-        assert!(
-            device_manager
-                .get_device(DeviceType::Virtio(type_id), id)
-                .is_none()
-        );
     }
 
     #[test]
