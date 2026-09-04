@@ -148,6 +148,8 @@ pub struct Vmm {
 
     // Guest VM devices.
     mmio_device_manager: MMIODeviceManager,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pci_device_manager: Option<device_manager::pci::PciDeviceManager>,
 
     // Out-of-band live pause/resume requests: the C API sends `VmCtl` from
     // another thread; the event loop freezes or wakes the vCPUs. A single
@@ -279,6 +281,7 @@ impl Vmm {
     }
 
     /// Configures the system for boot.
+    #[allow(clippy::too_many_arguments)]
     pub fn configure_system(
         &self,
         vcpus: &[Vcpu],
@@ -286,6 +289,7 @@ impl Vmm {
         initrd: &Option<InitrdConfig>,
         _smbios_oem_strings: &Option<Vec<String>>,
         _virtio_mmio_devices: &[(u64, u32)],
+        _virtio_pci: bool,
         _pvh: bool,
     ) -> Result<()> {
         #[cfg(target_arch = "x86_64")]
@@ -305,6 +309,7 @@ impl Vmm {
                 vcpus.len() as u8,
                 _pvh,
                 _virtio_mmio_devices,
+                _virtio_pci,
             )
             .map_err(Error::ConfigureSystem)?;
         }
