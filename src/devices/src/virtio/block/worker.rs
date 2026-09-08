@@ -1,14 +1,19 @@
 use crate::virtio::descriptor_utils::{Reader, Writer};
 
 use super::super::DeviceQueue;
+use super::super::Queue;
 use super::device::{CacheType, DiskProperties};
+use crate::virtio::DescriptorChain;
 
 use crate::virtio::InterruptTransport;
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::result;
-use std::thread;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 use utils::eventfd::EventFd;
 #[cfg(target_os = "windows")]
@@ -58,6 +63,118 @@ pub struct DiscardWriteData {
 // Safe because DiscardWriteData only contains plain data.
 unsafe impl ByteValued for DiscardWriteData {}
 
+struct ReadJob {
+    head_index: u16,
+    sector: u64,
+    data_len: usize,
+    writer: SendWriter,
+}
+
+struct ReadDone {
+    head_index: u16,
+    len: u32,
+}
+
+struct SendWriter(Writer<'static>);
+
+// SAFETY: guest memory mappings are process-wide and outlive the VM.
+unsafe impl Send for SendWriter {}
+
+struct SharedState {
+    queue: Mutex<Queue>,
+    mem: GuestMemoryMmap,
+    interrupt: InterruptTransport,
+    disk: DiskProperties,
+    pending_reads: AtomicUsize,
+}
+
+impl SharedState {
+    fn add_used(&self, head_index: u16, len: u32) {
+        let mem = &self.mem;
+        let mut queue = self.queue.lock().unwrap();
+        if let Err(e) = queue.add_used(mem, head_index, len) {
+            error!("failed to add used elements to the queue: {e:?}");
+        }
+
+        if queue.needs_notification(mem).unwrap()
+            && let Err(e) = self.interrupt.try_signal_used_queue()
+        {
+            error!("error signalling queue: {e:?}");
+        }
+    }
+
+    fn complete_request(&self, head_index: u16, mut writer: Writer, status: u8, len: usize) {
+        if let Err(e) = writer.write_obj(status) {
+            error!("Failed to write virtio block status: {e:?}")
+        }
+        self.add_used(head_index, len as u32);
+    }
+
+    fn complete_ioerr(&self, head_index: u16, writer: Writer) {
+        self.complete_request(
+            head_index,
+            writer,
+            VIRTIO_BLK_S_IOERR.try_into().unwrap(),
+            0,
+        );
+    }
+
+    fn finish_read(&self, done: ReadDone) {
+        self.add_used(done.head_index, done.len);
+        self.pending_reads.fetch_sub(1, Ordering::Release);
+    }
+
+    fn drain_read_completions(&self, read_done_rx: &Receiver<ReadDone>) {
+        while let Ok(done) = read_done_rx.try_recv() {
+            self.finish_read(done);
+        }
+    }
+
+    fn wait_for_pending_reads(&self, read_done_rx: &Receiver<ReadDone>) {
+        while self.pending_reads.load(Ordering::Acquire) > 0 {
+            match read_done_rx.recv() {
+                Ok(done) => self.finish_read(done),
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+fn read_worker(rx: Receiver<ReadJob>, done_tx: Sender<ReadDone>, shared: Arc<SharedState>) {
+    while let Ok(mut job) = rx.recv() {
+        let (status, len): (u8, usize) = if !job.data_len.is_multiple_of(512) {
+            (VIRTIO_BLK_S_IOERR.try_into().unwrap(), 0)
+        } else {
+            match job
+                .writer
+                .0
+                .write_from_at(&shared.disk, job.data_len, job.sector * 512)
+            {
+                Ok(l) => (VIRTIO_BLK_S_OK.try_into().unwrap(), l),
+                Err(e) => {
+                    error!("error processing read request: {e:?}");
+                    (VIRTIO_BLK_S_IOERR.try_into().unwrap(), 0)
+                }
+            }
+        };
+
+        if let Err(e) = job.writer.0.write_obj(status) {
+            error!("Failed to write virtio block status: {e:?}");
+        }
+
+        if done_tx
+            .send(ReadDone {
+                head_index: job.head_index,
+                len: len as u32,
+            })
+            .is_err()
+        {
+            shared.pending_reads.fetch_sub(1, Ordering::Release);
+            shared.add_used(job.head_index, len as u32);
+        }
+    }
+}
+
 pub struct BlockWorker {
     device_queue: DeviceQueue,
     interrupt: InterruptTransport,
@@ -90,9 +207,44 @@ impl BlockWorker {
             .unwrap()
     }
 
-    fn work(mut self) {
-        let virtq_ev_fd = self.device_queue.event.as_raw_fd();
-        let stop_ev_fd = self.stop_fd.as_raw_fd();
+    fn work(self) {
+        let BlockWorker {
+            device_queue,
+            interrupt,
+            mem,
+            disk,
+            stop_fd,
+        } = self;
+        let DeviceQueue { queue, event } = device_queue;
+        let virtq_ev_fd = event.as_raw_fd();
+        let stop_ev_fd = stop_fd.as_raw_fd();
+
+        let read_pool_size = thread::available_parallelism()
+            .map(|n| n.get().clamp(2, 8))
+            .unwrap_or(4);
+        let (read_tx, read_rx) = unbounded::<ReadJob>();
+        let (read_done_tx, read_done_rx) = unbounded::<ReadDone>();
+        let shared = Arc::new(SharedState {
+            queue: Mutex::new(queue),
+            mem: mem.clone(),
+            interrupt: interrupt.clone(),
+            disk,
+            pending_reads: AtomicUsize::new(0),
+        });
+
+        let mut read_workers: Vec<JoinHandle<()>> = (0..read_pool_size)
+            .map(|i| {
+                thread::Builder::new()
+                    .name(format!("block read worker {i}"))
+                    .spawn({
+                        let rx = read_rx.clone();
+                        let done_tx = read_done_tx.clone();
+                        let shared = shared.clone();
+                        move || read_worker(rx, done_tx, shared)
+                    })
+                    .unwrap()
+            })
+            .collect();
 
         let mut epoll = Epoll::new().unwrap();
 
@@ -110,18 +262,36 @@ impl BlockWorker {
 
         let mut epoll_events = vec![EpollEvent::new(EventSet::empty(), 0); 32];
         loop {
+            shared.drain_read_completions(&read_done_rx);
+
             match epoll.wait(epoll_events.len(), -1, epoll_events.as_mut_slice()) {
                 Ok(ev_cnt) => {
-                    for event in &epoll_events[0..ev_cnt] {
-                        let source = event.fd();
-                        let event_set = event.event_set();
+                    for epoll_event in &epoll_events[0..ev_cnt] {
+                        let source = epoll_event.fd();
+                        let event_set = epoll_event.event_set();
                         match event_set {
                             EventSet::IN if source == virtq_ev_fd => {
-                                self.process_queue_event();
+                                if let Err(e) = event.read() {
+                                    error!("Failed to get queue event: {e:?}");
+                                } else {
+                                    Self::process_virtio_queues(
+                                        &shared,
+                                        &read_tx,
+                                        &read_done_rx,
+                                        &mem,
+                                    );
+                                }
                             }
                             EventSet::IN if source == stop_ev_fd => {
                                 debug!("stopping worker thread");
-                                let _ = self.stop_fd.read();
+                                let _ = stop_fd.read();
+                                drop(read_tx);
+                                drop(read_done_tx);
+                                for worker in read_workers.drain(..) {
+                                    let _ = worker.join();
+                                }
+                                shared.drain_read_completions(&read_done_rx);
+                                shared.wait_for_pending_reads(&read_done_rx);
                                 return;
                             }
                             _ => {
@@ -139,111 +309,127 @@ impl BlockWorker {
         }
     }
 
-    fn process_queue_event(&mut self) {
-        if let Err(e) = self.device_queue.event.read() {
-            error!("Failed to get queue event: {e:?}");
-        } else {
-            self.process_virtio_queues();
-        }
-    }
-
-    /// Process device virtio queue(s).
-    fn process_virtio_queues(&mut self) {
-        let mem = self.mem.clone();
+    fn process_virtio_queues(
+        shared: &Arc<SharedState>,
+        read_tx: &Sender<ReadJob>,
+        read_done_rx: &Receiver<ReadDone>,
+        mem: &GuestMemoryMmap,
+    ) {
         loop {
-            self.device_queue.queue.disable_notification(&mem).unwrap();
+            let requests = {
+                let mut queue = shared.queue.lock().unwrap();
+                queue.disable_notification(mem).unwrap();
+                let mut requests = Vec::new();
+                while let Some(head) = queue.pop(mem) {
+                    requests.push(head);
+                }
+                requests
+            };
 
-            self.process_queue(&mem);
+            for head in requests {
+                Self::dispatch_request(shared, read_tx, mem, head);
+            }
 
-            if !self.device_queue.queue.enable_notification(&mem).unwrap() {
+            shared.drain_read_completions(read_done_rx);
+
+            let more = {
+                let mut queue = shared.queue.lock().unwrap();
+                queue.enable_notification(mem).unwrap()
+            };
+            if !more {
                 break;
             }
         }
     }
 
-    fn process_queue(&mut self, mem: &GuestMemoryMmap) {
-        while let Some(head) = self.device_queue.queue.pop(mem) {
-            let mut reader = match Reader::new(mem, head.clone()) {
-                Ok(r) => r,
-                Err(e) => {
-                    error!("invalid descriptor chain: {e:?}");
-                    continue;
+    fn dispatch_request(
+        shared: &Arc<SharedState>,
+        read_tx: &Sender<ReadJob>,
+        mem: &GuestMemoryMmap,
+        head: DescriptorChain<'_>,
+    ) {
+        let head_index = head.index;
+        let mut reader = match Reader::new(mem, head.clone()) {
+            Ok(r) => r,
+            Err(e) => {
+                error!("invalid descriptor chain: {e:?}");
+                if let Ok(writer) = Writer::new(mem, head) {
+                    shared.complete_ioerr(head_index, writer);
                 }
-            };
-            let mut writer = match Writer::new(mem, head.clone()) {
-                Ok(r) => r,
-                Err(e) => {
-                    error!("invalid descriptor chain: {e:?}");
-                    continue;
+                return;
+            }
+        };
+        let mut writer = match Writer::new(mem, head.clone()) {
+            Ok(r) => r,
+            Err(e) => {
+                error!("invalid descriptor chain: {e:?}");
+                if let Ok(writer) = Writer::new(mem, head) {
+                    shared.complete_ioerr(head_index, writer);
                 }
-            };
-            let request_header: RequestHeader = match reader.read_obj() {
-                Ok(h) => h,
-                Err(e) => {
-                    error!("invalid request header: {e:?}");
-                    continue;
+                return;
+            }
+        };
+        let request_header: RequestHeader = match reader.read_obj() {
+            Ok(h) => h,
+            Err(e) => {
+                error!("invalid request header: {e:?}");
+                shared.complete_ioerr(head_index, writer);
+                return;
+            }
+        };
+
+        if request_header.request_type == VIRTIO_BLK_T_IN {
+            let data_len = writer.available_bytes().saturating_sub(1);
+            // SAFETY: guest memory outlives the VM and is kept alive in `SharedState`.
+            let writer = unsafe { std::mem::transmute::<Writer<'_>, Writer<'static>>(writer) };
+            shared.pending_reads.fetch_add(1, Ordering::Release);
+            match read_tx.send(ReadJob {
+                head_index,
+                sector: request_header.sector,
+                data_len,
+                writer: SendWriter(writer),
+            }) {
+                Ok(()) => {}
+                Err(job) => {
+                    shared.pending_reads.fetch_sub(1, Ordering::Release);
+                    shared.complete_ioerr(job.0.head_index, job.0.writer.0);
                 }
-            };
-
-            let (status, len): (u8, usize) =
-                match self.process_request(request_header, &mut reader, &mut writer) {
-                    Ok(l) => (VIRTIO_BLK_S_OK.try_into().unwrap(), l),
-                    Err(e) => {
-                        error!("error processing request: {e:?}");
-                        (VIRTIO_BLK_S_IOERR.try_into().unwrap(), 0)
-                    }
-                };
-
-            if let Err(e) = writer.write_obj(status) {
-                error!("Failed to write virtio block status: {e:?}")
             }
-
-            if let Err(e) = self
-                .device_queue
-                .queue
-                .add_used(mem, head.index, len as u32)
-            {
-                error!("failed to add used elements to the queue: {e:?}");
-            }
-
-            if self.device_queue.queue.needs_notification(mem).unwrap()
-                && let Err(e) = self.interrupt.try_signal_used_queue()
-            {
-                error!("error signalling queue: {e:?}");
-            }
+            return;
         }
+
+        let (status, len): (u8, usize) =
+            match Self::process_request(request_header, &mut reader, &mut writer, &shared.disk) {
+                Ok(l) => (VIRTIO_BLK_S_OK.try_into().unwrap(), l),
+                Err(e) => {
+                    error!("error processing request: {e:?}");
+                    (VIRTIO_BLK_S_IOERR.try_into().unwrap(), 0)
+                }
+            };
+
+        shared.complete_request(head_index, writer, status, len);
     }
 
     fn process_request(
-        &mut self,
         request_header: RequestHeader,
         reader: &mut Reader,
         writer: &mut Writer,
+        disk: &DiskProperties,
     ) -> result::Result<usize, RequestError> {
         match request_header.request_type {
-            VIRTIO_BLK_T_IN => {
-                let data_len = writer.available_bytes() - 1;
-                if !data_len.is_multiple_of(512) {
-                    Err(RequestError::InvalidDataLength)
-                } else {
-                    writer
-                        .write_from_at(&self.disk, data_len, request_header.sector * 512)
-                        .map_err(RequestError::WritingToDescriptor)
-                }
-            }
             VIRTIO_BLK_T_OUT => {
                 let data_len = reader.available_bytes();
                 if !data_len.is_multiple_of(512) {
                     Err(RequestError::InvalidDataLength)
                 } else {
                     reader
-                        .read_to_at(&self.disk, data_len, request_header.sector * 512)
+                        .read_to_at(disk, data_len, request_header.sector * 512)
                         .map_err(RequestError::ReadingFromDescriptor)
                 }
             }
-            VIRTIO_BLK_T_FLUSH => match self.disk.cache_type() {
+            VIRTIO_BLK_T_FLUSH => match disk.cache_type() {
                 CacheType::Writeback => {
-                    let diskfile = self.disk.file.lock().unwrap();
+                    let diskfile = disk.file.write().unwrap();
                     diskfile.flush().map_err(RequestError::FlushingToDisk)?;
                     diskfile.sync().map_err(RequestError::FlushingToDisk)?;
                     Ok(0)
@@ -252,7 +438,7 @@ impl BlockWorker {
             },
             VIRTIO_BLK_T_GET_ID => {
                 let data_len = writer.available_bytes();
-                let disk_id = self.disk.image_id();
+                let disk_id = disk.image_id();
                 if data_len < disk_id.len() {
                     Err(RequestError::InvalidDataLength)
                 } else {
@@ -266,9 +452,8 @@ impl BlockWorker {
                 let discard_write_data: DiscardWriteData = reader
                     .read_obj()
                     .map_err(RequestError::ReadingFromDescriptor)?;
-                self.disk
-                    .file
-                    .lock()
+                disk.file
+                    .write()
                     .unwrap()
                     .discard_to_any(
                         discard_write_data.sector * 512,
@@ -282,21 +467,16 @@ impl BlockWorker {
                     .read_obj()
                     .map_err(RequestError::ReadingFromDescriptor)?;
                 let unmap = (discard_write_data.flags & VIRTIO_BLK_WRITE_ZEROES_FLAG_UNMAP) != 0;
+                let mut diskfile = disk.file.write().unwrap();
                 if unmap {
-                    self.disk
-                        .file
-                        .lock()
-                        .unwrap()
+                    diskfile
                         .discard_to_zero(
                             discard_write_data.sector * 512,
                             discard_write_data.num_sectors as u64 * 512,
                         )
                         .map_err(RequestError::DiscardingToZero)?;
                 } else {
-                    self.disk
-                        .file
-                        .lock()
-                        .unwrap()
+                    diskfile
                         .write_zeroes(
                             discard_write_data.sector * 512,
                             discard_write_data.num_sectors as u64 * 512,
