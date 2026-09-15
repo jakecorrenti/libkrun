@@ -288,6 +288,7 @@ impl Vmm {
         _smbios_oem_strings: &Option<Vec<String>>,
         _acpi_enabled: bool,
         _virtio_mmio_devices: &[(u64, u32)],
+        _virtio_pci: bool,
         _pvh: bool,
     ) -> Result<()> {
         #[cfg(target_arch = "x86_64")]
@@ -308,6 +309,7 @@ impl Vmm {
                 _pvh,
                 _acpi_enabled,
                 _virtio_mmio_devices,
+                _virtio_pci,
             )
             .map_err(Error::ConfigureSystem)?;
         }
