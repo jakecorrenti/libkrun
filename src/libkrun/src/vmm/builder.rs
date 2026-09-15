@@ -1243,6 +1243,8 @@ pub fn build_microvm(
         exit_code: exit_code.clone(),
         vm,
         mmio_device_manager,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        pci_device_manager: None,
         #[cfg(target_os = "macos")]
         vm_ctl_tx,
         #[cfg(target_os = "macos")]
