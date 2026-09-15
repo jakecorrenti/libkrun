@@ -44,3 +44,24 @@ pub(crate) fn ecam_access(bdf: &PciBdf, offset: u16, write: bool, data: &[u8], f
         _ => {}
     }
 }
+
+pub(crate) fn msix_enable(bdf: &PciBdf, enabled: bool, masked: bool) {
+    log::debug!(
+        target: "krun_devices::virtio::pci",
+        "{bdf}: MSI-X enable={enabled} function_mask={masked}"
+    );
+}
+
+pub(crate) fn msix_vector(bdf: &PciBdf, vector: usize, addr_lo: u32, addr_hi: u32, data: u32) {
+    log::debug!(
+        target: "krun_devices::virtio::pci",
+        "{bdf}: MSI-X vector {vector} addr={addr_hi:#010x}:{addr_lo:#010x} data={data:#010x}"
+    );
+}
+
+pub(crate) fn msix_route_update(bdf: &PciBdf, gsi: u32) {
+    log::debug!(
+        target: "krun_devices::virtio::pci",
+        "{bdf}: KVM MSI route updated for GSI {gsi}"
+    );
+}
