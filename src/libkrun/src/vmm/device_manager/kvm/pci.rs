@@ -52,7 +52,6 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub const ECAM_SIZE: u64 = 256 * 1024 * 1024;
 
-#[allow(dead_code)]
 pub struct PciDeviceManager {
     pci_bus: Arc<Mutex<PciBus>>,
     pci_mmio_base: u64,
@@ -66,7 +65,6 @@ pub struct PciDeviceManager {
     ecam_registered: bool,
 }
 
-#[allow(dead_code)]
 impl PciDeviceManager {
     pub fn new(
         pci_mmio_base: u64,
