@@ -1329,6 +1329,7 @@ pub fn build_microvm(
         &vm_resources.smbios_oem_strings,
         vm_resources.acpi_enabled,
         &virtio_mmio_devices,
+        false,
         payload_config.pvh,
     )
     .map_err(StartMicrovmError::Internal)?;
