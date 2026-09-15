@@ -148,6 +148,9 @@ pub struct Vmm {
 
     // Guest VM devices.
     pub(crate) mmio_device_manager: MMIODeviceManager,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[allow(dead_code)]
+    pub(crate) pci_device_manager: Option<device_manager::pci::PciDeviceManager>,
 
     // Out-of-band live pause/resume requests: the C API sends `VmCtl` from
     // another thread; the event loop freezes or wakes the vCPUs. A single
