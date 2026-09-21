@@ -284,7 +284,7 @@ pub fn arch_memory_regions(
 /// the IOAPIC and virtio-mmio IRQs stop working after the PIC→APIC transition.
 #[cfg(feature = "tdx")]
 pub fn setup_mptable_for_tdshim(guest_mem: &GuestMemoryMmap, num_cpus: u8) -> super::Result<()> {
-    mptable::setup_mptable(guest_mem, num_cpus).map_err(Error::MpTableSetup)
+    mptable::setup_mptable(guest_mem, num_cpus, &[]).map_err(Error::MpTableSetup)
 }
 
 /// Configures the system and should be called once per vm before starting vcpu threads.
@@ -308,13 +308,16 @@ pub fn configure_system(
     pvh: bool,
     acpi_enabled: bool,
     virtio_mmio_devices: &[(u64, u32)],
+    pci_intx: &[(u8, u32)],
 ) -> super::Result<()> {
     if acpi_enabled {
         acpi::setup_acpi(guest_mem, num_cpus, virtio_mmio_devices).map_err(Error::AcpiSetup)?;
     } else {
         // Note that this puts the mptable at the last 1k of Linux's 640k base RAM
         #[cfg(not(feature = "tee"))]
-        mptable::setup_mptable(guest_mem, num_cpus).map_err(Error::MpTableSetup)?;
+        mptable::setup_mptable(guest_mem, num_cpus, pci_intx).map_err(Error::MpTableSetup)?;
+        #[cfg(feature = "tee")]
+        let _ = pci_intx;
     }
 
     if pvh {
@@ -633,8 +636,18 @@ mod tests {
         let no_vcpus = 4;
         let gm = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let info = ArchMemoryInfo::default();
-        let config_err =
-            configure_system(&gm, &info, GuestAddress(0), 0, &None, 1, false, false, &[]);
+        let config_err = configure_system(
+            &gm,
+            &info,
+            GuestAddress(0),
+            0,
+            &None,
+            1,
+            false,
+            false,
+            &[],
+            &[],
+        );
         assert!(config_err.is_err());
         #[cfg(not(feature = "tee"))]
         assert_eq!(
@@ -657,6 +670,7 @@ mod tests {
             false,
             false,
             &[],
+            &[],
         )
         .unwrap();
 
@@ -675,6 +689,7 @@ mod tests {
             false,
             false,
             &[],
+            &[],
         )
         .unwrap();
 
@@ -692,6 +707,7 @@ mod tests {
             no_vcpus,
             false,
             false,
+            &[],
             &[],
         )
         .unwrap();

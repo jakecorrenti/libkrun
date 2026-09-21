@@ -328,6 +328,15 @@ impl Vmm {
                 self.kernel_cmdline.len() + 1
             };
 
+            #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+            let pci_intx: &[(u8, u32)] = self
+                .pci
+                .as_ref()
+                .map(|p| p.intx_routes.as_slice())
+                .unwrap_or(&[]);
+            #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
+            let pci_intx: &[(u8, u32)] = &[];
+
             arch::x86_64::configure_system(
                 &self.guest_memory,
                 &self.arch_memory_info,
@@ -338,6 +347,7 @@ impl Vmm {
                 _pvh,
                 _acpi_enabled,
                 _virtio_mmio_devices,
+                pci_intx,
             )
             .map_err(Error::ConfigureSystem)?;
         }
