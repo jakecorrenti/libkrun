@@ -23,6 +23,7 @@ pub mod virtio;
 
 pub use self::bus::{Bus, BusDevice, Error as BusError};
 pub use self::pci::PciConfigSpace;
+pub use self::pci::PciHostBridge;
 #[cfg(target_arch = "x86_64")]
 pub use self::pci::{PciAddress, PciConfigMechanism1, PciFunction, PciRoot};
 

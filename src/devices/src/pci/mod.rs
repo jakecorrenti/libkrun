@@ -7,7 +7,9 @@
 #[cfg(target_arch = "x86_64")]
 mod conf1;
 mod config;
+mod host_bridge;
 
 #[cfg(target_arch = "x86_64")]
 pub use conf1::{PciAddress, PciConfigMechanism1, PciFunction, PciRoot};
 pub use config::PciConfigSpace;
+pub use host_bridge::PciHostBridge;

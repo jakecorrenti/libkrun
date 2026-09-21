@@ -111,6 +111,10 @@ impl PciConfigSpace {
         self.write_u8(offset::REVISION_ID, revision_id);
     }
 
+    pub fn set_header_type(&mut self, header_type: u8) {
+        self.write_u8(offset::HEADER_TYPE, header_type);
+    }
+
     /// Class code as `(base_class, sub_class, prog_if)`.
     pub fn set_class_code(&mut self, base_class: u8, sub_class: u8, prog_if: u8) {
         self.write_u8(offset::CLASS_CODE, prog_if);
