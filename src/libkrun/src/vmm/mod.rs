@@ -156,6 +156,9 @@ pub struct Vmm {
 
     // Guest VM devices.
     pub(crate) mmio_device_manager: MMIODeviceManager,
+    /// PCI attachment state when virtio-pci is selected (x86_64 KVM only).
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    pub(crate) pci: Option<device_manager::pci::PciAttachState>,
 
     // Out-of-band live pause/resume requests: the C API sends `VmCtl` from
     // another thread; the event loop freezes or wakes the vCPUs. A single

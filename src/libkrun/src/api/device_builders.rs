@@ -18,6 +18,8 @@ use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, Mutex};
 
 use crate::vmm::Vmm;
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+use crate::vmm::builder::attach_pci_device;
 use crate::vmm::builder::{attach_mmio_device, setup_terminal_raw_mode};
 use crate::vmm::device_manager::shm::ShmManager;
 #[cfg(any(feature = "gpu", feature = "vhost-user"))]
@@ -101,6 +103,30 @@ impl<'a> AttachContext<'a> {
             }),
             #[cfg(target_os = "macos")]
             map_sender,
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    pub(crate) fn new_pci(
+        vmm: &'a mut Vmm,
+        event_manager: &'a mut EventManager,
+        shm_manager: &'a ShmManager,
+        intc: IrqChip,
+        device_index: usize,
+    ) -> Self {
+        Self {
+            vmm,
+            event_manager,
+            shm_manager,
+            intc,
+            device_index,
+            register_fn: Box::new(|vmm, id, intc, device| {
+                attach_pci_device(vmm, id, intc, device)
+                    .map_err(|e| VmmError::Internal(format!("{e:?}")))?;
+                Ok(())
+            }),
+            #[cfg(target_os = "macos")]
+            map_sender: None,
         }
     }
 
@@ -375,8 +401,8 @@ impl<'a> DeviceManager<'a> for MmioDeviceManager<'a> {
 /// manager instead of [`MmioDeviceManager`] to select PCI over MMIO.
 ///
 /// PCI support is currently limited to x86_64 Linux KVM with ACPI
-/// disabled. Attachment returns [`VmmError::FeatureDisabled`] until the
-/// transport backend is wired in.
+/// disabled. Other configurations return [`VmmError::FeatureDisabled`]
+/// or [`VmmError::InvalidParam`] from [`VmmBuilder::build`].
 #[derive(Default)]
 pub struct PciDeviceManager<'a> {
     devices: Vec<Box<dyn AttachDevice<'a> + 'a>>,
@@ -417,17 +443,28 @@ impl<'a> DeviceManager<'a> for PciDeviceManager<'a> {
     #[cfg_attr(feature = "ffi", ffier(skip))]
     fn attach_all(
         self: Box<Self>,
-        _vmm: &mut Vmm,
-        _event_manager: &mut EventManager,
-        _shm_manager: &ShmManager,
-        _intc: IrqChip,
+        vmm: &mut Vmm,
+        event_manager: &mut EventManager,
+        shm_manager: &ShmManager,
+        intc: IrqChip,
         #[cfg(target_os = "macos")] _map_sender: Option<
             crossbeam_channel::Sender<utils::worker_message::WorkerMessage>,
         >,
     ) -> Result<(), VmmError> {
-        // Stub until the virtio-pci transport and config Mechanism #1
-        // backend land in later commits of this series.
-        Err(VmmError::FeatureDisabled())
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+        {
+            for (i, device) in self.devices.into_iter().enumerate() {
+                let mut ctx =
+                    AttachContext::new_pci(vmm, event_manager, shm_manager, intc.clone(), i);
+                device.attach(&mut ctx)?;
+            }
+            Ok(())
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
+        {
+            let _ = (vmm, event_manager, shm_manager, intc);
+            Err(VmmError::FeatureDisabled())
+        }
     }
 }
 

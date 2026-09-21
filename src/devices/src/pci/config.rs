@@ -158,6 +158,16 @@ impl PciConfigSpace {
         self.write_u32(offset::BAR0 + index * 4, 0);
     }
 
+    /// Host-side: program BAR `index` to `address` (type bits preserved).
+    pub fn set_bar_address(&mut self, index: usize, address: u32) {
+        assert!(index < 6);
+        let type_bits = self.read_u32(offset::BAR0 + index * 4) & !BAR_ADDRESS_MASK;
+        self.write_u32(
+            offset::BAR0 + index * 4,
+            (address & BAR_ADDRESS_MASK) | type_bits,
+        );
+    }
+
     /// Guest-facing config read at `reg_offset` into `data` (1, 2, or 4 bytes).
     pub fn read(&self, reg_offset: usize, data: &mut [u8]) {
         match data.len() {

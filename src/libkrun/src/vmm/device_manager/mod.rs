@@ -11,6 +11,10 @@ pub mod legacy;
 /// Device Shared Memory Region Manager.
 pub mod shm;
 
+/// PCI virtio attachment (x86_64 KVM only).
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+pub mod pci;
+
 /// Memory Mapped I/O Manager.
 #[cfg(target_os = "linux")]
 pub mod kvm;

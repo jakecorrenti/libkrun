@@ -348,6 +348,15 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, VmmError> {
         .device_manager
         .ok_or_else(|| VmmError::MissingConfig("no device manager set (call .devices())".into()))?;
 
+    if device_manager.is_pci() {
+        if !cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+            return Err(VmmError::FeatureDisabled());
+        }
+        if builder_cfg.acpi {
+            return Err(VmmError::InvalidParam());
+        }
+    }
+
     let mut vm_resources = VmResources::default();
     vm_resources
         .set_vm_config(&VmConfig {

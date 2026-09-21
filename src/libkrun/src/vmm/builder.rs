@@ -50,6 +50,8 @@ use devices::legacy::{IoApic, IrqChipT};
 use devices::legacy::{IrqChip, IrqChipDevice};
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 use devices::legacy::{KvmGicV2, KvmGicV3};
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+use devices::virtio::VirtioPciTransport;
 use devices::virtio::{MmioTransport, VirtioDevice};
 
 #[cfg(feature = "tee")]
@@ -714,6 +716,7 @@ pub fn build_microvm(
     let payload = choose_payload(vm_resources)?;
 
     let requirements = device_manager.requirements();
+    let use_pci = device_manager.is_pci();
     let fs_shm_sizes: Vec<Option<usize>> = requirements.iter().map(|r| r.shm_size).collect();
     #[cfg(feature = "gpu")]
     let gpu_shm_size = requirements.iter().filter_map(|r| r.gpu_shm).next();
@@ -1031,6 +1034,25 @@ pub fn build_microvm(
     .map_err(Error::CreateLegacyDevice)
     .map_err(StartMicrovmError::Internal)?;
 
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    let pci_attach = if use_pci {
+        if vm_resources.acpi_enabled {
+            return Err(StartMicrovmError::AttachDevice(
+                "virtio-pci cannot be combined with ACPI".into(),
+            ));
+        }
+        let root = devices::PciRoot::new();
+        crate::vmm::device_manager::pci::add_host_bridge(&root);
+        Some(crate::vmm::device_manager::pci::PciAttachState::new(root))
+    } else {
+        None
+    };
+    #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
+    let pci_attach = {
+        let _ = use_pci;
+        Option::<()>::None
+    };
+
     // Instantiate the MMIO device manager.
     // 'mmio_base' address has to be an address which is protected by the kernel
     // and is architectural specific.
@@ -1069,6 +1091,16 @@ pub fn build_microvm(
             &mut mmio_device_manager,
             Some(intc.clone()),
         )?;
+
+        if let Some(ref pci) = pci_attach {
+            let conf1 = Arc::new(Mutex::new(devices::PciConfigMechanism1::new(
+                pci.root.clone(),
+            )));
+            pio_device_manager
+                .io_bus
+                .insert(conf1, 0xCF8, 8)
+                .map_err(|e| StartMicrovmError::AttachDevice(format!("pci conf1 port: {e}")))?;
+        }
 
         let kernel_boot = vm_resources.firmware_config.is_none() && !cfg!(feature = "tee");
 
@@ -1243,6 +1275,8 @@ pub fn build_microvm(
         exit_code: exit_code.clone(),
         vm,
         mmio_device_manager,
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+        pci: pci_attach,
         #[cfg(target_os = "macos")]
         vm_ctl_tx,
         #[cfg(target_os = "macos")]
@@ -2397,7 +2431,7 @@ fn create_vcpus_riscv64(
     Ok(vcpus)
 }
 
-/// Attaches an virtio mmio device to the device manager.
+/// Attaches a virtio device via the MMIO transport.
 #[allow(unused)]
 pub(crate) fn attach_mmio_device(
     vmm: &mut Vmm,
@@ -2418,6 +2452,28 @@ pub(crate) fn attach_mmio_device(
         vmm.mmio_device_manager
             .register_mmio_device(mmio_device, type_id, id)?;
 
+    Ok(())
+}
+
+/// Attaches a virtio device via the PCI transport (x86_64 KVM).
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+pub(crate) fn attach_pci_device(
+    vmm: &mut Vmm,
+    _id: String,
+    intc: IrqChip,
+    device: Arc<Mutex<dyn VirtioDevice>>,
+) -> std::result::Result<(), device_manager::mmio::Error> {
+    let transport = VirtioPciTransport::new(vmm.guest_memory().clone(), intc, device)?;
+    let pci = vmm
+        .pci
+        .as_mut()
+        .expect("attach_pci_device without PCI state");
+    device_manager::pci::register_pci_device(
+        pci,
+        vmm.vm.fd(),
+        &mut vmm.mmio_device_manager.bus,
+        transport,
+    )?;
     Ok(())
 }
 
