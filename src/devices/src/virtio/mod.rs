@@ -51,7 +51,7 @@ pub use self::gpu::*;
 pub use self::mmio::*;
 #[cfg(feature = "net")]
 pub use self::net::Net;
-pub use self::pci::{NOTIFY_OFFSET, VIRTIO_PCI_BAR_SIZE, modern_virtio_config_space};
+pub use self::pci::{NOTIFY_OFFSET, VIRTIO_PCI_BAR_SIZE, VirtioPciTransport};
 pub use self::queue::{Descriptor, DescriptorChain, Queue};
 #[cfg(not(feature = "tee"))]
 pub use self::rng::*;
