@@ -9,6 +9,7 @@
 
 typedef void* KrunVmmError;
 typedef void* KrunMmioDeviceManager;
+typedef void* KrunPciDeviceManager;
 typedef void* KrunFsDevice;
 typedef void* KrunConsoleDevice;
 typedef void* KrunConsoleBuilder;
@@ -29,13 +30,14 @@ typedef void* KrunDisplayBackend;
 typedef void* KrunGpuDevice;
 typedef void* KrunInputDevice;
 typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBlockDevice | KrunNetDevice | KrunGpuDevice | KrunInputDevice | KrunVhostUserDevice | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice */
+typedef void* KrunDeviceManager; /* KrunMmioDeviceManager | KrunPciDeviceManager */
 typedef void* KrunError; /* KrunVmmError | KrunVtableError */
 typedef void* KrunPushStr; /* KrunVtablePushStr */
 
 #ifndef KRUN_PRIMITIVES_DEFINED
 #define KRUN_PRIMITIVES_DEFINED
 
-typedef void* KrunObject; /* KrunVmmError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunNitroConfig | KrunVmmBuilder | KrunVmm | KrunVmmHandle | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice | KrunBlockDevice | KrunNetDevice | KrunDisplayInfoBuilder | KrunVhostUserDevice | KrunDisplayBackend | KrunGpuDevice | KrunInputDevice */
+typedef void* KrunObject; /* KrunVmmError | KrunMmioDeviceManager | KrunPciDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunNitroConfig | KrunVmmBuilder | KrunVmm | KrunVmmHandle | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice | KrunBlockDevice | KrunNetDevice | KrunDisplayInfoBuilder | KrunVhostUserDevice | KrunDisplayBackend | KrunGpuDevice | KrunInputDevice */
 
 typedef uint64_t KrunResult;
 #define KRUN_RESULT_SUCCESS 0
@@ -202,6 +204,23 @@ void krun_mmio_device_manager_add(KrunMmioDeviceManager handle, KrunAttachDevice
 typedef void (*krun_mmio_device_manager_add_fn)(KrunMmioDeviceManager handle, KrunAttachDevice device);
 void krun_mmio_device_manager_destroy(KrunMmioDeviceManager handle);
 typedef void (*krun_mmio_device_manager_destroy_fn)(KrunMmioDeviceManager handle);
+
+/* PciDeviceManager -------------------------------------------------- */
+
+/** Create an empty device manager. */
+KrunPciDeviceManager krun_pci_device_manager_new();
+typedef KrunPciDeviceManager (*krun_pci_device_manager_new_fn)();
+/**
+ * Add a device to this manager.
+ *
+ * Devices are attached in the order they are added. The device must
+ * implement [`AttachDevice`] — all built-in device types
+ * (`FsDevice`, `ConsoleDevice`, etc.) implement this trait.
+ */
+void krun_pci_device_manager_add(KrunPciDeviceManager handle, KrunAttachDevice device);
+typedef void (*krun_pci_device_manager_add_fn)(KrunPciDeviceManager handle, KrunAttachDevice device);
+void krun_pci_device_manager_destroy(KrunPciDeviceManager handle);
+typedef void (*krun_pci_device_manager_destroy_fn)(KrunPciDeviceManager handle);
 
 /* FsDevice ---------------------------------------------------------- */
 
@@ -383,8 +402,18 @@ KrunResult krun_vmm_builder_ram_mib(KrunVmmBuilder* handle, uint32_t mib, KrunEr
 typedef KrunResult (*krun_vmm_builder_ram_mib_fn)(KrunVmmBuilder* handle, uint32_t mib, KrunError* err_out);
 void krun_vmm_builder_payload(KrunVmmBuilder* handle, KrunPayload payload);
 typedef void (*krun_vmm_builder_payload_fn)(KrunVmmBuilder* handle, KrunPayload payload);
-void krun_vmm_builder_devices(KrunVmmBuilder* handle, KrunMmioDeviceManager devices);
-typedef void (*krun_vmm_builder_devices_fn)(KrunVmmBuilder* handle, KrunMmioDeviceManager devices);
+/**
+ * Attach virtio devices.
+ *
+ * The transport is determined by the manager:
+ * [`MmioDeviceManager`](super::device_builders::MmioDeviceManager)
+ * or [`PciDeviceManager`](super::device_builders::PciDeviceManager).
+ * PCI is currently limited to x86_64 Linux KVM with ACPI disabled;
+ * other configurations return [`VmmError::FeatureDisabled`] from
+ * [`Self::build`].
+ */
+void krun_vmm_builder_devices(KrunVmmBuilder* handle, KrunDeviceManager devices);
+typedef void (*krun_vmm_builder_devices_fn)(KrunVmmBuilder* handle, KrunDeviceManager devices);
 void krun_vmm_builder_set_kernel_console(KrunVmmBuilder* handle, KrunStr console);
 typedef void (*krun_vmm_builder_set_kernel_console_fn)(KrunVmmBuilder* handle, KrunStr console);
 /**

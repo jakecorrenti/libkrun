@@ -40,7 +40,7 @@ pub use device_builders::RngDevice;
 pub use device_builders::VhostUserDevice;
 pub use device_builders::{
     AttachContext, AttachDevice, DeviceManager, DeviceRequirements, MmioDeviceManager,
-    ResolvedShmRegion, TsiFlags, VsockDevice,
+    PciDeviceManager, ResolvedShmRegion, TsiFlags, VsockDevice,
 };
 pub use device_builders::{ConsoleBuilder, ConsoleDevice};
 #[cfg(any(feature = "gpu", feature = "vhost-user"))]
@@ -63,6 +63,11 @@ ffier::library_definition!("krun", library_tag = 1,
     primitives_prefix = "krun",
     crate::api::error::VmmError = 1,
     crate::api::device_builders::MmioDeviceManager<'_> = 2,
+    crate::api::device_builders::PciDeviceManager<'_> = 25,
+    crate::api::device_builders::DeviceManager
+        for crate::api::device_builders::MmioDeviceManager<'_>,
+    crate::api::device_builders::DeviceManager
+        for crate::api::device_builders::PciDeviceManager<'_>,
     #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
     crate::api::device_builders::FsDevice<'_> = 3,
     crate::api::device_builders::ConsoleDevice<'_> = 4,

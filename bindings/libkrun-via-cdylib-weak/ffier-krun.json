@@ -68,6 +68,16 @@
         "a"
       ]
     },
+    "DeviceManager": {
+      "kind": {
+        "trait": {
+          "c_name": "KrunDeviceManager"
+        }
+      },
+      "lifetime_params": [
+        "a"
+      ]
+    },
     "DiskFormat": {
       "kind": {
         "enum": {
@@ -250,6 +260,17 @@
         }
       },
       "type_tag": 16777224
+    },
+    "PciDeviceManager": {
+      "kind": {
+        "handle": {
+          "c_name": "KrunPciDeviceManager"
+        }
+      },
+      "type_tag": 16777241,
+      "lifetime_params": [
+        "a"
+      ]
     },
     "PushStr": {
       "kind": {
@@ -472,6 +493,55 @@
             "type": "Self"
           },
           "ffi_name": "krun_mmio_device_manager_add"
+        }
+      ]
+    },
+    {
+      "name": "PciDeviceManager",
+      "destroy_ffi_name": "krun_pci_device_manager_destroy",
+      "is_builder_type": false,
+      "methods": [
+        {
+          "name": "new",
+          "doc": [
+            " Create an empty device manager."
+          ],
+          "receiver": "none",
+          "params": [],
+          "ret": {
+            "return_kind": "value",
+            "type": "PciDeviceManager",
+            "type_args": [
+              "a"
+            ]
+          },
+          "ffi_name": "krun_pci_device_manager_new"
+        },
+        {
+          "name": "add",
+          "doc": [
+            " Add a device to this manager.",
+            "",
+            " Devices are attached in the order they are added. The device must",
+            " implement [`AttachDevice`] — all built-in device types",
+            " (`FsDevice`, `ConsoleDevice`, etc.) implement this trait."
+          ],
+          "receiver": "mut",
+          "params": [
+            {
+              "name": "device",
+              "param_kind": "impl_trait",
+              "trait_name": "AttachDevice",
+              "type_args": [
+                "a"
+              ]
+            }
+          ],
+          "ret": {
+            "return_kind": "value",
+            "type": "Self"
+          },
+          "ffi_name": "krun_pci_device_manager_add"
         }
       ]
     },
@@ -1330,12 +1400,21 @@
         },
         {
           "name": "devices",
+          "doc": [
+            " Attach virtio devices.",
+            "",
+            " The transport is determined by the manager:",
+            " [`MmioDeviceManager`](super::device_builders::MmioDeviceManager)",
+            " or [`PciDeviceManager`](super::device_builders::PciDeviceManager).",
+            " PCI is currently limited to x86_64 Linux KVM; other configurations",
+            " return [`VmmError::FeatureDisabled`] from [`Self::build`]."
+          ],
           "receiver": "value",
           "params": [
             {
               "name": "devices",
-              "param_kind": "regular",
-              "type": "MmioDeviceManager",
+              "param_kind": "impl_trait",
+              "trait_name": "DeviceManager",
               "type_args": [
                 "a"
               ]
@@ -2875,6 +2954,34 @@
     }
   ],
   "trait_impls": [
+    {
+      "trait_name": "DeviceManager",
+      "struct_name": "MmioDeviceManager",
+      "lifetimes": [
+        "a"
+      ],
+      "trait_lifetime_args": [
+        "a"
+      ],
+      "struct_lifetime_args": [
+        "a"
+      ],
+      "methods": []
+    },
+    {
+      "trait_name": "DeviceManager",
+      "struct_name": "PciDeviceManager",
+      "lifetimes": [
+        "a"
+      ],
+      "trait_lifetime_args": [
+        "a"
+      ],
+      "struct_lifetime_args": [
+        "a"
+      ],
+      "methods": []
+    },
     {
       "trait_name": "AttachDevice",
       "struct_name": "FsDevice",

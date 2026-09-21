@@ -17,7 +17,7 @@ use utils::eventfd::EventFd;
 #[cfg(target_os = "macos")]
 use utils::pollable_channel::PollableChannelSender;
 
-use super::device_builders::{DeviceManager, MmioDeviceManager};
+use super::device_builders::DeviceManager;
 use super::error::VmmError;
 use super::payload::Payload;
 
@@ -64,7 +64,15 @@ impl<'a> VmmBuilder<'a> {
         self
     }
 
-    pub fn devices(mut self, devices: MmioDeviceManager<'a>) -> Self {
+    /// Attach virtio devices.
+    ///
+    /// The transport is determined by the manager:
+    /// [`MmioDeviceManager`](super::device_builders::MmioDeviceManager)
+    /// or [`PciDeviceManager`](super::device_builders::PciDeviceManager).
+    /// PCI is currently limited to x86_64 Linux KVM with ACPI disabled;
+    /// other configurations return [`VmmError::FeatureDisabled`] from
+    /// [`Self::build`].
+    pub fn devices(mut self, devices: impl DeviceManager<'a>) -> Self {
         self.device_manager = Some(Box::new(devices));
         self
     }

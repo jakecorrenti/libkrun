@@ -106,7 +106,7 @@ impl<'a> AttachContext<'a> {
 
     /// Register a virtio device on the transport bus.
     ///
-    /// The actual transport (MMIO, future PCIe) is determined by which
+    /// The actual transport (MMIO or PCI) is determined by which
     /// [`DeviceManager`] the device was added to.
     pub fn register(
         &mut self,
@@ -272,7 +272,7 @@ mod sealed {
 }
 
 /// A device manager that owns a set of devices and knows how to attach them
-/// to a VM using a specific transport (e.g. MMIO, future PCIe).
+/// to a VM using a specific transport (e.g. MMIO or PCI).
 ///
 /// This trait is sealed — only libkrun-provided managers can implement it.
 /// The seal may be lifted in a future major version.
@@ -280,6 +280,16 @@ pub trait DeviceManager<'a>: sealed::Sealed + Send + 'a {
     /// Collect requirements from all devices (called before guest memory creation).
     #[doc(hidden)]
     fn requirements(&self) -> Vec<DeviceRequirements>;
+
+    /// Whether this manager uses the virtio-pci transport.
+    ///
+    /// The VMM uses this before device attach so it can install PCI
+    /// configuration Mechanism #1 I/O ports before cloning the port bus
+    /// into the vCPUs.
+    #[doc(hidden)]
+    fn is_pci(&self) -> bool {
+        false
+    }
 
     /// Attach all devices using the given VMM context.
     #[doc(hidden)]
@@ -324,11 +334,14 @@ impl<'a> MmioDeviceManager<'a> {
 
 impl sealed::Sealed for MmioDeviceManager<'_> {}
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 impl<'a> DeviceManager<'a> for MmioDeviceManager<'a> {
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn requirements(&self) -> Vec<DeviceRequirements> {
         self.devices.iter().map(|d| d.requirements()).collect()
     }
 
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn attach_all(
         self: Box<Self>,
         vmm: &mut Vmm,
@@ -352,6 +365,69 @@ impl<'a> DeviceManager<'a> for MmioDeviceManager<'a> {
             device.attach(&mut ctx)?;
         }
         Ok(())
+    }
+}
+
+/// Device manager using the virtio-pci transport.
+///
+/// Devices added to this manager will be registered as PCI functions
+/// during VM construction. Call [`VmmBuilder::devices`] with this
+/// manager instead of [`MmioDeviceManager`] to select PCI over MMIO.
+///
+/// PCI support is currently limited to x86_64 Linux KVM with ACPI
+/// disabled. Attachment returns [`VmmError::FeatureDisabled`] until the
+/// transport backend is wired in.
+#[derive(Default)]
+pub struct PciDeviceManager<'a> {
+    devices: Vec<Box<dyn AttachDevice<'a> + 'a>>,
+}
+
+#[cfg_attr(feature = "ffi", ffier::export)]
+impl<'a> PciDeviceManager<'a> {
+    /// Create an empty device manager.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a device to this manager.
+    ///
+    /// Devices are attached in the order they are added. The device must
+    /// implement [`AttachDevice`] — all built-in device types
+    /// (`FsDevice`, `ConsoleDevice`, etc.) implement this trait.
+    pub fn add(&mut self, device: impl AttachDevice<'a>) -> &mut Self {
+        self.devices.push(Box::new(device));
+        self
+    }
+}
+
+impl sealed::Sealed for PciDeviceManager<'_> {}
+
+#[cfg_attr(feature = "ffi", ffier::export)]
+impl<'a> DeviceManager<'a> for PciDeviceManager<'a> {
+    #[cfg_attr(feature = "ffi", ffier(skip))]
+    fn requirements(&self) -> Vec<DeviceRequirements> {
+        self.devices.iter().map(|d| d.requirements()).collect()
+    }
+
+    #[cfg_attr(feature = "ffi", ffier(skip))]
+    fn is_pci(&self) -> bool {
+        true
+    }
+
+    #[cfg_attr(feature = "ffi", ffier(skip))]
+    fn attach_all(
+        self: Box<Self>,
+        _vmm: &mut Vmm,
+        _event_manager: &mut EventManager,
+        _shm_manager: &ShmManager,
+        _intc: IrqChip,
+        #[cfg(target_os = "macos")] _map_sender: Option<
+            crossbeam_channel::Sender<utils::worker_message::WorkerMessage>,
+        >,
+    ) -> Result<(), VmmError> {
+        // Stub until the virtio-pci transport and config Mechanism #1
+        // backend land in later commits of this series.
+        Err(VmmError::FeatureDisabled())
     }
 }
 

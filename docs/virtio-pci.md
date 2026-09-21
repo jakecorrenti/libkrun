@@ -42,9 +42,9 @@ Interrupts reuse [`InterruptTransport`](../src/devices/src/virtio/mmio.rs) and `
 
 ## API
 
-[`VmmBuilder::devices`](../src/libkrun/src/api/vmm_builder.rs) keeps taking `MmioDeviceManager`. Add `PciDeviceManager` (same `add()` surface, same [`DeviceManager`](../src/libkrun/src/api/device_builders.rs) impl) and `VmmBuilder::pci_devices()`. Whichever is called last is the manager that `build()` attaches. Regenerate the C header with `make gen-libkrun-bindings` and assign the new type id `25` in the `ffier::library_definition!` block in [`src/libkrun/src/api/mod.rs`](../src/libkrun/src/api/mod.rs).
+[`VmmBuilder::devices`](../src/libkrun/src/api/vmm_builder.rs) takes a [`DeviceManager`](../src/libkrun/src/api/device_builders.rs): [`MmioDeviceManager`](../src/libkrun/src/api/device_builders.rs) or [`PciDeviceManager`](../src/libkrun/src/api/device_builders.rs) (same `add()` surface). The manager that `build()` attaches is whichever one was passed. Regenerate the C header with `make gen-libkrun-bindings` and assign the new type id `25` in the `ffier::library_definition!` block in [`src/libkrun/src/api/mod.rs`](../src/libkrun/src/api/mod.rs).
 
-[`examples/chroot_vm.c`](../examples/chroot_vm.c) gets `--transport=mmio|pci`, default `mmio`. On `pci` it builds a `KrunPciDeviceManager` and calls `krun_vmm_builder_pci_devices`.
+[`examples/chroot_vm.c`](../examples/chroot_vm.c) gets `--transport=mmio|pci`, default `mmio`. On `pci` it builds a `KrunPciDeviceManager` and still calls `krun_vmm_builder_devices`.
 
 The I/O-port device has to be on the port bus before that bus is cloned into vCPUs (see [`builder.rs`](../src/libkrun/src/vmm/builder.rs) around `PortIODeviceManager` and `create_vcpus`). `build()` detects a PCI manager up front, inserts one config-port device at `0xCF8` length 8, and keeps the function list behind `Arc<Mutex<...>>` so devices attached later show up in the vCPUs' existing clones.
 
@@ -52,7 +52,7 @@ The I/O-port device has to be on the port bus before that bus is cloned into vCP
 
 Each commit compiles on its own, is `cargo fmt` clean, and passes `cargo clippy --locked -- -D warnings` for the feature sets in `AGENTS.md` that still build the touched crates. The body says what landed, why it is needed, and the PCI concept in plain language. Do not refactor the MMIO transport; copy the virtio status and queue sequence into the PCI transport so MMIO stays a stable reference.
 
-1. **api: add a PCI device manager** — `PciDeviceManager`, `pci_devices()`, header regeneration. Attach returns `FeatureDisabled` until the backend exists. Explains that the transport is chosen by which manager owns the devices, which this crate already does for MMIO.
+1. **api: add a PCI device manager** — `PciDeviceManager`, `devices()` accepts either manager, header regeneration. Attach returns `FeatureDisabled` until the backend exists. Explains that the transport is chosen by which manager owns the devices, which this crate already does for MMIO.
 
 2. **pci: add a 256-byte configuration space** — standard header fields and 1/2/4-byte little-endian accesses. Explains the 64-byte header: vendor, device, command, status, class, BARs, capability pointer, interrupt pin.
 
