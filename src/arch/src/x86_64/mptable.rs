@@ -133,6 +133,11 @@ fn compute_mp_size(num_cpus: u8, pci_intx_count: usize) -> usize {
 /// a PCI bus entry is added and one INTSRC is written per slot so the guest
 /// can enable the device; without them Linux logs `PCI: no IRQ` and leaves
 /// virtio-pci stuck.
+///
+/// Linux's `IO_APIC_get_PCI_irq_vector(bus, slot, pin)` uses the PCI bus
+/// number as `srcbus` and rejects the lookup if that id is marked ISA. With
+/// PCI devices the PCI bus is therefore id 0 (matching `0000:00`) and ISA
+/// moves to id 1. The MMIO-only table is unchanged: ISA stays on bus 0.
 pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8, pci_intx: &[(u8, u32)]) -> Result<()> {
     if u32::from(num_cpus) > MAX_SUPPORTED_CPUS {
         return Err(Error::TooManyCpus);
@@ -199,23 +204,25 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8, pci_intx: &[(u8, u32)]
             checksum = checksum.wrapping_add(compute_checksum(&mpc_cpu.0));
         }
     }
-    {
+    let has_pci = !pci_intx.is_empty();
+    let isa_bus = u8::from(has_pci);
+    if has_pci {
         let size = mem::size_of::<MpcBusWrapper>() as u64;
         let mut mpc_bus = MpcBusWrapper(mpspec::mpc_bus::default());
         mpc_bus.0.type_ = mpspec::MP_BUS as u8;
         mpc_bus.0.busid = 0;
-        mpc_bus.0.bustype = BUS_TYPE_ISA;
+        mpc_bus.0.bustype = BUS_TYPE_PCI;
         mem.write_obj(mpc_bus, base_mp)
             .map_err(|_| Error::WriteMpcBus)?;
         base_mp = base_mp.unchecked_add(size);
         checksum = checksum.wrapping_add(compute_checksum(&mpc_bus.0));
     }
-    if !pci_intx.is_empty() {
+    {
         let size = mem::size_of::<MpcBusWrapper>() as u64;
         let mut mpc_bus = MpcBusWrapper(mpspec::mpc_bus::default());
         mpc_bus.0.type_ = mpspec::MP_BUS as u8;
-        mpc_bus.0.busid = 1;
-        mpc_bus.0.bustype = BUS_TYPE_PCI;
+        mpc_bus.0.busid = isa_bus;
+        mpc_bus.0.bustype = BUS_TYPE_ISA;
         mem.write_obj(mpc_bus, base_mp)
             .map_err(|_| Error::WriteMpcBus)?;
         base_mp = base_mp.unchecked_add(size);
@@ -241,7 +248,7 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8, pci_intx: &[(u8, u32)]
         mpc_intsrc.0.type_ = mpspec::MP_INTSRC as u8;
         mpc_intsrc.0.irqtype = mpspec::mp_irq_source_types_mp_INT as u8;
         mpc_intsrc.0.irqflag = mpspec::MP_IRQDIR_DEFAULT as u16;
-        mpc_intsrc.0.srcbus = 0;
+        mpc_intsrc.0.srcbus = isa_bus;
         mpc_intsrc.0.srcbusirq = i;
         mpc_intsrc.0.dstapic = ioapicid;
         mpc_intsrc.0.dstirq = i;
@@ -256,7 +263,7 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8, pci_intx: &[(u8, u32)]
         mpc_intsrc.0.type_ = mpspec::MP_INTSRC as u8;
         mpc_intsrc.0.irqtype = mpspec::mp_irq_source_types_mp_INT as u8;
         mpc_intsrc.0.irqflag = MP_IRQ_EDGE_HIGH;
-        mpc_intsrc.0.srcbus = 1;
+        mpc_intsrc.0.srcbus = 0;
         // PCI srcbusirq: (device << 2) | (pin - 1); INTA => pin 1.
         mpc_intsrc.0.srcbusirq = slot << 2;
         mpc_intsrc.0.dstapic = ioapicid;
@@ -272,7 +279,7 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8, pci_intx: &[(u8, u32)]
         mpc_lintsrc.0.type_ = mpspec::MP_LINTSRC as u8;
         mpc_lintsrc.0.irqtype = mpspec::mp_irq_source_types_mp_ExtINT as u8;
         mpc_lintsrc.0.irqflag = mpspec::MP_IRQDIR_DEFAULT as u16;
-        mpc_lintsrc.0.srcbusid = 0;
+        mpc_lintsrc.0.srcbusid = isa_bus;
         mpc_lintsrc.0.srcbusirq = 0;
         mpc_lintsrc.0.destapic = 0;
         mpc_lintsrc.0.destapiclint = 0;
@@ -287,7 +294,7 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8, pci_intx: &[(u8, u32)]
         mpc_lintsrc.0.type_ = mpspec::MP_LINTSRC as u8;
         mpc_lintsrc.0.irqtype = mpspec::mp_irq_source_types_mp_NMI as u8;
         mpc_lintsrc.0.irqflag = mpspec::MP_IRQDIR_DEFAULT as u16;
-        mpc_lintsrc.0.srcbusid = 0;
+        mpc_lintsrc.0.srcbusid = isa_bus;
         mpc_lintsrc.0.srcbusirq = 0;
         mpc_lintsrc.0.destapic = 0xFF; /* to all local APICs */
         mpc_lintsrc.0.destapiclint = 1;
