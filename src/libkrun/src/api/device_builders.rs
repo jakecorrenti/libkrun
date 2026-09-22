@@ -400,9 +400,10 @@ impl<'a> DeviceManager<'a> for MmioDeviceManager<'a> {
 /// during VM construction. Call [`VmmBuilder::devices`] with this
 /// manager instead of [`MmioDeviceManager`] to select PCI over MMIO.
 ///
-/// PCI support is currently limited to x86_64 Linux KVM with ACPI
-/// disabled. Other configurations return [`VmmError::FeatureDisabled`]
-/// or [`VmmError::InvalidParam`] from [`VmmBuilder::build`].
+/// PCI support is currently limited to x86_64 Linux KVM. Other
+/// configurations return [`VmmError::FeatureDisabled`] from
+/// [`VmmBuilder::build`]. ACPI and PCI can be enabled together:
+/// INTx is then described by `_PRT` instead of the MP table.
 #[derive(Default)]
 pub struct PciDeviceManager<'a> {
     devices: Vec<Box<dyn AttachDevice<'a> + 'a>>,

@@ -408,9 +408,10 @@ typedef void (*krun_vmm_builder_payload_fn)(KrunVmmBuilder* handle, KrunPayload 
  * The transport is determined by the manager:
  * [`MmioDeviceManager`](super::device_builders::MmioDeviceManager)
  * or [`PciDeviceManager`](super::device_builders::PciDeviceManager).
- * PCI is currently limited to x86_64 Linux KVM with ACPI disabled;
- * other configurations return [`VmmError::FeatureDisabled`] from
- * [`Self::build`].
+ * PCI is currently limited to x86_64 Linux KVM; other configurations
+ * return [`VmmError::FeatureDisabled`] from [`Self::build`]. ACPI and
+ * PCI can be enabled together: INTx is then a DSDT `_PRT` instead of
+ * the MP table.
  */
 void krun_vmm_builder_devices(KrunVmmBuilder* handle, KrunDeviceManager devices);
 typedef void (*krun_vmm_builder_devices_fn)(KrunVmmBuilder* handle, KrunDeviceManager devices);
@@ -437,7 +438,8 @@ typedef KrunResult (*krun_vmm_builder_split_irqchip_fn)(KrunVmmBuilder* handle, 
  *
  * When disabled (the default), virtio-mmio devices are passed on the kernel
  * command line and SMP uses the MP table. When enabled, devices are described
- * in the ACPI DSDT and the RSDP is published in boot parameters.
+ * in the ACPI DSDT and the RSDP is published in boot parameters. Virtio-pci
+ * INTx is routed through `_PRT` in that case instead of the MP table.
  */
 KrunResult krun_vmm_builder_acpi(KrunVmmBuilder* handle, bool enabled, KrunError* err_out);
 typedef KrunResult (*krun_vmm_builder_acpi_fn)(KrunVmmBuilder* handle, bool enabled, KrunError* err_out);

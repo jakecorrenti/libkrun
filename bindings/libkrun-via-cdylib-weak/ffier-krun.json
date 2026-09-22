@@ -1407,7 +1407,9 @@
             " [`MmioDeviceManager`](super::device_builders::MmioDeviceManager)",
             " or [`PciDeviceManager`](super::device_builders::PciDeviceManager).",
             " PCI is currently limited to x86_64 Linux KVM; other configurations",
-            " return [`VmmError::FeatureDisabled`] from [`Self::build`]."
+            " return [`VmmError::FeatureDisabled`] from [`Self::build`]. ACPI and",
+            " PCI can be enabled together: INTx is then a DSDT `_PRT` instead of",
+            " the MP table."
           ],
           "receiver": "value",
           "params": [
@@ -1530,7 +1532,8 @@
             "",
             " When disabled (the default), virtio-mmio devices are passed on the kernel",
             " command line and SMP uses the MP table. When enabled, devices are described",
-            " in the ACPI DSDT and the RSDP is published in boot parameters."
+            " in the ACPI DSDT and the RSDP is published in boot parameters. Virtio-pci",
+            " INTx is routed through `_PRT` in that case instead of the MP table."
           ],
           "receiver": "value",
           "params": [

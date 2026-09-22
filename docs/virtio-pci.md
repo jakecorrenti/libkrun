@@ -2,7 +2,7 @@
 
 Draft plan. MMIO remains the default. Callers opt into PCI by attaching devices through a new manager instead of [`MmioDeviceManager`](../src/libkrun/src/api/device_builders.rs). The device objects (console, fs, vsock, net, and the rest) stay on [`VirtioDevice`](../src/devices/src/virtio/device.rs); only the transport wrapper changes.
 
-Scope is the path [`examples/chroot_vm.c`](../examples/chroot_vm.c) actually boots: x86_64 Linux KVM, ACPI off, in-kernel irqchip. `PciDeviceManager` exists on every build, and `build()` returns [`VmmError::FeatureDisabled`](../src/libkrun/src/api/error.rs) on any other architecture or host. Combining PCI with `VmmBuilder::acpi(true)` returns [`VmmError::InvalidParam`](../src/libkrun/src/api/error.rs). No ECAM, no MSI-X, no virtio shared-memory capability (virtio-fs root does not use DAX), no IOMMU, no bridges.
+Scope is the path [`examples/chroot_vm.c`](../examples/chroot_vm.c) actually boots: x86_64 Linux KVM, in-kernel irqchip. `PciDeviceManager` exists on every build, and `build()` returns [`VmmError::FeatureDisabled`](../src/libkrun/src/api/error.rs) on any other architecture or host. ACPI and PCI can be enabled together: INTx is then a DSDT `_PRT` instead of the MP table. No ECAM, no MSI-X, no virtio shared-memory capability (virtio-fs root does not use DAX), no IOMMU, no bridges.
 
 The bundled libkrunfw kernel must already contain `CONFIG_PCI`, `CONFIG_VIRTIO_PCI`, and direct PCI config access (`CONFIG_PCI_DIRECT` or `CONFIG_PCI_GOANY`). That kernel lives outside this repo. The guest test below is how we find out.
 
@@ -16,7 +16,7 @@ flowchart TD
   cfg["256-byte config space"]
   bar["Preassigned BAR in the MMIO hole"]
   virtio["Common config, notify, ISR, device config"]
-  mp["MP table PCI INTx route"]
+  mp["MP table or ACPI _PRT INTx route"]
   irqfd["Existing irqfd to an IOAPIC pin"]
 
   caller --> mmio --> cmdline
@@ -38,7 +38,7 @@ Each virtio function is modern, non-transitional virtio-pci (spec 4.1):
 
 BARs are preassigned at `MMIO_MEM_START + slot * 0x1000` ([`layout.rs`](../src/arch/src/x86_64/layout.rs), the existing hole below 4GB, which is not RAM in the e820 map). The whole window is inserted into the MMIO bus before vCPUs snapshot it. [`Bus`](../src/devices/src/bus.rs) clones the address map by value, and vCPUs already hold that clone by the time the guest runs, so BAR relocation after boot would be invisible. Config space still implements the size probe (write `0xFFFFFFFF`, read the mask, write the address back). The MMIO mapping stays at the preassigned window; config-space BAR writes do not move it.
 
-Interrupts reuse [`InterruptTransport`](../src/devices/src/virtio/mmio.rs) and `register_irqfd` on the next free GSI from `IRQ_BASE` (5) through `IRQ_MAX` (23), the same pins virtio-mmio uses. The MP table, which is already published when ACPI is off, gains a PCI bus and one INTSRC entry per slot. The entry is edge-triggered, active-high, because KVM irqfd delivers an edge. The ISR byte is the virtio-pci variant: a read returns the pending config/queue bits and clears them.
+Interrupts reuse [`InterruptTransport`](../src/devices/src/virtio/mmio.rs) and `register_irqfd` on the next free GSI from `IRQ_BASE` (5) through `IRQ_MAX` (23), the same pins virtio-mmio uses. The MP table, which is already published when ACPI is off, gains a PCI bus and one INTSRC entry per slot. When ACPI is on, the same routes are a DSDT `_PRT` of PNP0C0F links instead of MP-table INTSRC entries. Either way the polarity is edge-triggered, active-high, because KVM irqfd delivers an edge. The ISR byte is the virtio-pci variant: a read returns the pending config/queue bits and clears them.
 
 ## API
 
@@ -64,7 +64,7 @@ Each commit compiles on its own, is `cargo fmt` clean, and passes `cargo clippy 
 
 6. **virtio-pci: run the virtio device from the common config** — features, queues, status, notify, ISR-on-read, device config, activation through the existing `VirtioDevice`. Explains that this is the same virtio 1.0 sequence as MMIO, at the offsets the capabilities named.
 
-7. **vmm: attach virtio-pci on x86_64 KVM** — fixed MMIO window, preassigned BARs, notify ioeventfd, INTx irqfd, replace the API stub. Reject other architectures and ACPI. Explains a BAR (guest-chosen MMIO window) and an interrupt pin (which line the device raises).
+7. **vmm: attach virtio-pci on x86_64 KVM** — fixed MMIO window, preassigned BARs, notify ioeventfd, INTx irqfd, replace the API stub. Reject other architectures. Explains a BAR (guest-chosen MMIO window) and an interrupt pin (which line the device raises).
 
 8. **x86_64: route PCI INTx through the MP table** — PCI bus plus per-slot INTSRC, only when PCI devices exist. The MMIO MP table stays as it is. Explains why the guest otherwise logs `PCI: no IRQ` and never enables the device.
 

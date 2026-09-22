@@ -69,9 +69,10 @@ impl<'a> VmmBuilder<'a> {
     /// The transport is determined by the manager:
     /// [`MmioDeviceManager`](super::device_builders::MmioDeviceManager)
     /// or [`PciDeviceManager`](super::device_builders::PciDeviceManager).
-    /// PCI is currently limited to x86_64 Linux KVM with ACPI disabled;
-    /// other configurations return [`VmmError::FeatureDisabled`] from
-    /// [`Self::build`].
+    /// PCI is currently limited to x86_64 Linux KVM; other configurations
+    /// return [`VmmError::FeatureDisabled`] from [`Self::build`]. ACPI and
+    /// PCI can be enabled together: INTx is then a DSDT `_PRT` instead of
+    /// the MP table.
     pub fn devices(mut self, devices: impl DeviceManager<'a>) -> Self {
         self.device_manager = Some(Box::new(devices));
         self
@@ -122,7 +123,8 @@ impl<'a> VmmBuilder<'a> {
     ///
     /// When disabled (the default), virtio-mmio devices are passed on the kernel
     /// command line and SMP uses the MP table. When enabled, devices are described
-    /// in the ACPI DSDT and the RSDP is published in boot parameters.
+    /// in the ACPI DSDT and the RSDP is published in boot parameters. Virtio-pci
+    /// INTx is routed through `_PRT` in that case instead of the MP table.
     pub fn acpi(mut self, enabled: bool) -> Result<Self, VmmError> {
         if enabled && !cfg!(target_arch = "x86_64") {
             return Err(VmmError::InvalidParam());
@@ -348,13 +350,8 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, VmmError> {
         .device_manager
         .ok_or_else(|| VmmError::MissingConfig("no device manager set (call .devices())".into()))?;
 
-    if device_manager.is_pci() {
-        if !cfg!(all(target_arch = "x86_64", target_os = "linux")) {
-            return Err(VmmError::FeatureDisabled());
-        }
-        if builder_cfg.acpi {
-            return Err(VmmError::InvalidParam());
-        }
+    if device_manager.is_pci() && !cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+        return Err(VmmError::FeatureDisabled());
     }
 
     let mut vm_resources = VmResources::default();

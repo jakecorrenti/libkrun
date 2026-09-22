@@ -311,7 +311,8 @@ pub fn configure_system(
     pci_intx: &[(u8, u32)],
 ) -> super::Result<()> {
     if acpi_enabled {
-        acpi::setup_acpi(guest_mem, num_cpus, virtio_mmio_devices).map_err(Error::AcpiSetup)?;
+        acpi::setup_acpi(guest_mem, num_cpus, virtio_mmio_devices, pci_intx)
+            .map_err(Error::AcpiSetup)?;
     } else {
         // Note that this puts the mptable at the last 1k of Linux's 640k base RAM
         #[cfg(not(feature = "tee"))]

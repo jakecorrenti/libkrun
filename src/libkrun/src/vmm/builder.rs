@@ -1036,11 +1036,6 @@ pub fn build_microvm(
 
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     let pci_attach = if use_pci {
-        if vm_resources.acpi_enabled {
-            return Err(StartMicrovmError::AttachDevice(
-                "virtio-pci cannot be combined with ACPI".into(),
-            ));
-        }
         let root = devices::PciRoot::new();
         crate::vmm::device_manager::pci::add_host_bridge(&root);
         Some(crate::vmm::device_manager::pci::PciAttachState::new(root))
