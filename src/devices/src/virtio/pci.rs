@@ -224,7 +224,16 @@ impl VirtioPciTransport {
     }
 
     fn create_queues(queue_config: &[QueueConfig]) -> Vec<Queue> {
-        queue_config.iter().map(|c| Queue::new(c.size)).collect()
+        queue_config
+            .iter()
+            .map(|c| {
+                let mut queue = Queue::new(c.size);
+                // virtio-pci queue_size reads as the current size; the
+                // driver expects the device maximum until it programs one.
+                queue.size = c.size;
+                queue
+            })
+            .collect()
     }
 
     fn create_queue_evts(count: usize) -> Result<Vec<Arc<EventFd>>, CreateMmioTransportError> {
@@ -463,7 +472,7 @@ impl VirtioPciTransport {
             0x16 if data.len() == 2 => self.queue_select = byte_order::read_le_u16(data),
             0x18 if data.len() == 2 => {
                 let v = byte_order::read_le_u16(data);
-                self.update_queue_field(|q| q.size = v);
+                self.update_queue_field(|q| q.size = v.min(q.get_max_size()));
             }
             0x1a if data.len() == 2 => { /* queue_msix_vector ignored */ }
             0x1c if data.len() == 2 => {
