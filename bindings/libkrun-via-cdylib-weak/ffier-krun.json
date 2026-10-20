@@ -1887,7 +1887,9 @@
         {
           "name": "set_parallel_reads",
           "doc": [
-            " Set whether to service block read requests in parallel."
+            " Set whether to service block read requests in parallel.",
+            "",
+            " Enabling parallel reads selects the minimum pool size unless one is set."
           ],
           "receiver": "mut",
           "params": [
@@ -1901,6 +1903,28 @@
             "return_kind": "void"
           },
           "ffi_name": "krun_block_device_set_parallel_reads"
+        },
+        {
+          "name": "set_read_pool_threads",
+          "doc": [
+            " Set the number of worker threads used for parallel block reads.",
+            "",
+            " A value of zero selects the minimum pool size. Requests are capped by the",
+            " available parallelism, or four if parallelism cannot be determined.",
+            " This setting is used only when parallel reads are enabled."
+          ],
+          "receiver": "mut",
+          "params": [
+            {
+              "name": "threads",
+              "param_kind": "regular",
+              "type": "usize"
+            }
+          ],
+          "ret": {
+            "return_kind": "void"
+          },
+          "ffi_name": "krun_block_device_set_read_pool_threads"
         },
         {
           "name": "set_sync_mode",

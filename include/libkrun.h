@@ -534,9 +534,22 @@ typedef void (*krun_block_device_set_read_only_fn)(KrunBlockDevice handle, bool 
 /** Set whether to bypass the host caches. */
 void krun_block_device_set_direct_io(KrunBlockDevice handle, bool direct_io);
 typedef void (*krun_block_device_set_direct_io_fn)(KrunBlockDevice handle, bool direct_io);
-/** Set whether to service block read requests in parallel. */
+/**
+ * Set whether to service block read requests in parallel.
+ *
+ * Enabling parallel reads selects the minimum pool size unless one is set.
+ */
 void krun_block_device_set_parallel_reads(KrunBlockDevice handle, bool parallel_reads);
 typedef void (*krun_block_device_set_parallel_reads_fn)(KrunBlockDevice handle, bool parallel_reads);
+/**
+ * Set the number of worker threads used for parallel block reads.
+ *
+ * A value of zero selects the minimum pool size. Requests are capped by the
+ * available parallelism, or four if parallelism cannot be determined.
+ * This setting is used only when parallel reads are enabled.
+ */
+void krun_block_device_set_read_pool_threads(KrunBlockDevice handle, size_t threads);
+typedef void (*krun_block_device_set_read_pool_threads_fn)(KrunBlockDevice handle, size_t threads);
 /**
  * Set whether to enable VIRTIO_BLK_F_FLUSH.
  *

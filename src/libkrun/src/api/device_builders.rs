@@ -16,6 +16,8 @@ use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "blk")]
+use std::thread;
 
 use crate::vmm::Vmm;
 #[cfg(all(
@@ -1421,6 +1423,9 @@ impl<'a> AttachDevice<'a> for VsockDevice {
     }
 }
 
+#[cfg(feature = "blk")]
+const MIN_READ_POOL_THREADS: usize = 2;
+
 /// A virtio block device backed by a disk image.
 #[cfg(feature = "blk")]
 pub struct BlockDevice {
@@ -1432,6 +1437,8 @@ pub struct BlockDevice {
     sync_mode: SyncMode,
     #[allow(dead_code)]
     parallel_reads: bool,
+    #[allow(dead_code)]
+    read_pool_threads: Option<usize>,
 }
 
 #[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"blk\""))]
@@ -1450,6 +1457,7 @@ impl BlockDevice {
             direct_io: false,
             sync_mode: SyncMode::default(),
             parallel_reads: false,
+            read_pool_threads: None,
         })
     }
 
@@ -1464,8 +1472,28 @@ impl BlockDevice {
     }
 
     /// Set whether to service block read requests in parallel.
+    ///
+    /// Enabling parallel reads selects the minimum pool size unless one is set.
     pub fn set_parallel_reads(&mut self, parallel_reads: bool) {
         self.parallel_reads = parallel_reads;
+        if parallel_reads && self.read_pool_threads.is_none() {
+            self.set_read_pool_threads(MIN_READ_POOL_THREADS);
+        }
+    }
+
+    /// Set the number of worker threads used for parallel block reads.
+    ///
+    /// A value of zero selects the minimum pool size. Requests are capped by the
+    /// available parallelism, or four if parallelism cannot be determined.
+    /// This setting is used only when parallel reads are enabled.
+    pub fn set_read_pool_threads(&mut self, threads: usize) {
+        let available = thread::available_parallelism().map_or(4, |n| n.get());
+        let requested = if threads == 0 {
+            MIN_READ_POOL_THREADS
+        } else {
+            threads
+        };
+        self.read_pool_threads = Some(requested.min(available));
     }
 
     /// Set whether to enable VIRTIO_BLK_F_FLUSH.
@@ -1474,6 +1502,41 @@ impl BlockDevice {
     /// and will not ask the drive to flush its buffered data.
     pub fn set_sync_mode(&mut self, sync_mode: SyncMode) {
         self.sync_mode = sync_mode;
+    }
+}
+
+#[cfg(all(test, feature = "blk"))]
+mod block_device_tests {
+    use super::{BlockDevice, DiskFormat, MIN_READ_POOL_THREADS};
+
+    #[test]
+    fn parallel_reads_and_pool_thread_count_preserve_call_order() {
+        let mut block = BlockDevice::new("disk", "disk.img", DiskFormat::Raw).unwrap();
+        block.set_parallel_reads(true);
+        assert!((1..=MIN_READ_POOL_THREADS).contains(&block.read_pool_threads.unwrap()));
+
+        block.set_read_pool_threads(1);
+        assert_eq!(block.read_pool_threads, Some(1));
+
+        let mut block = BlockDevice::new("disk", "disk.img", DiskFormat::Raw).unwrap();
+        block.set_read_pool_threads(1);
+        block.set_parallel_reads(true);
+        assert_eq!(block.read_pool_threads, Some(1));
+    }
+
+    #[test]
+    fn zero_read_pool_thread_count_selects_the_default() {
+        let mut block = BlockDevice::new("disk", "disk.img", DiskFormat::Raw).unwrap();
+        block.set_read_pool_threads(0);
+        assert!((1..=MIN_READ_POOL_THREADS).contains(&block.read_pool_threads.unwrap()));
+    }
+
+    #[test]
+    fn requested_pool_size_is_capped_at_available_parallelism() {
+        let available = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let mut block = BlockDevice::new("disk", "disk.img", DiskFormat::Raw).unwrap();
+        block.set_read_pool_threads(available.saturating_add(1));
+        assert_eq!(block.read_pool_threads, Some(available));
     }
 }
 
