@@ -247,6 +247,7 @@ pub struct Block {
     disk_image_id: Vec<u8>,
     worker_thread: Option<JoinHandle<()>>,
     worker_stopfd: EventFd,
+    read_pool_threads: Option<usize>,
 
     // Virtio fields.
     pub(crate) avail_features: u64,
@@ -275,6 +276,8 @@ impl Block {
         is_disk_read_only: bool,
         direct_io: bool,
         sync_mode: SyncMode,
+        parallel_reads: bool,
+        read_pool_threads: Option<usize>,
     ) -> io::Result<Block> {
         let disk_image = OpenOptions::new()
             .read(true)
@@ -363,6 +366,11 @@ impl Block {
             device_state: DeviceState::Inactive,
             worker_thread: None,
             worker_stopfd: EventFd::new(EFD_NONBLOCK)?,
+            read_pool_threads: if parallel_reads {
+                read_pool_threads
+            } else {
+                None
+            },
         })
     }
 
@@ -464,7 +472,12 @@ impl VirtioDevice for Block {
             mem.clone(),
             disk,
             self.worker_stopfd.try_clone().unwrap(),
-        );
+            self.read_pool_threads,
+        )
+        .map_err(|e| {
+            error!("Cannot create block read pool: {e}");
+            ActivateError::BadActivate
+        })?;
         self.worker_thread = Some(worker.run());
 
         self.device_state = DeviceState::Activated(mem, interrupt);
@@ -488,6 +501,33 @@ mod tests {
     use super::*;
 
     use utils::tempfile::TempFile;
+
+    #[test]
+    fn read_pool_is_configured_only_when_parallel_reads_are_enabled() {
+        let backing = TempFile::new().expect("create backing file");
+        backing
+            .as_file()
+            .set_len(SECTOR_SIZE)
+            .expect("size backing file");
+        let path = backing.as_path().to_str().unwrap().to_string();
+
+        for (parallel_reads, expected_threads) in [(false, None), (true, Some(2))] {
+            let block = Block::new(
+                "test".into(),
+                None,
+                CacheType::Unsafe,
+                path.clone(),
+                DiskFormat::Raw,
+                false,
+                false,
+                SyncMode::None,
+                parallel_reads,
+                Some(2),
+            )
+            .unwrap();
+            assert_eq!(block.read_pool_threads, expected_threads);
+        }
+    }
 
     #[test]
     fn disk_image_id_prefers_supplied_block_id() {

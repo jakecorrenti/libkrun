@@ -1435,9 +1435,7 @@ pub struct BlockDevice {
     is_read_only: bool,
     direct_io: bool,
     sync_mode: SyncMode,
-    #[allow(dead_code)]
     parallel_reads: bool,
-    #[allow(dead_code)]
     read_pool_threads: Option<usize>,
 }
 
@@ -1556,6 +1554,8 @@ impl<'a> AttachDevice<'a> for BlockDevice {
             self.is_read_only,
             self.direct_io,
             self.sync_mode,
+            self.parallel_reads,
+            self.read_pool_threads,
         )
         .map_err(|e| VmmError::Internal(format!("block: {e}")))?;
 
