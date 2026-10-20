@@ -524,7 +524,7 @@ typedef void (*krun_vsock_device_destroy_fn)(KrunVsockDevice handle);
  * Create a new block device.
  *
  * Defaults to read-write (`read_only = false`), cached I/O (`direct_io = false`),
- * and [`SyncMode::Relaxed`].
+ * [`SyncMode::Relaxed`], and disabled parallel reads.
  */
 KrunBlockDevice krun_block_device_new(KrunStr id, KrunStr disk_image_path, uint32_t format, KrunError* err_out);
 typedef KrunBlockDevice (*krun_block_device_new_fn)(KrunStr id, KrunStr disk_image_path, uint32_t format, KrunError* err_out);
@@ -534,6 +534,9 @@ typedef void (*krun_block_device_set_read_only_fn)(KrunBlockDevice handle, bool 
 /** Set whether to bypass the host caches. */
 void krun_block_device_set_direct_io(KrunBlockDevice handle, bool direct_io);
 typedef void (*krun_block_device_set_direct_io_fn)(KrunBlockDevice handle, bool direct_io);
+/** Set whether to service block read requests in parallel. */
+void krun_block_device_set_parallel_reads(KrunBlockDevice handle, bool parallel_reads);
+typedef void (*krun_block_device_set_parallel_reads_fn)(KrunBlockDevice handle, bool parallel_reads);
 /**
  * Set whether to enable VIRTIO_BLK_F_FLUSH.
  *

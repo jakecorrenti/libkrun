@@ -1430,6 +1430,8 @@ pub struct BlockDevice {
     is_read_only: bool,
     direct_io: bool,
     sync_mode: SyncMode,
+    #[allow(dead_code)]
+    parallel_reads: bool,
 }
 
 #[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"blk\""))]
@@ -1438,7 +1440,7 @@ impl BlockDevice {
     /// Create a new block device.
     ///
     /// Defaults to read-write (`read_only = false`), cached I/O (`direct_io = false`),
-    /// and [`SyncMode::Relaxed`].
+    /// [`SyncMode::Relaxed`], and disabled parallel reads.
     pub fn new(id: &str, disk_image_path: &str, format: DiskFormat) -> Result<Self, VmmError> {
         Ok(Self {
             id: id.to_string(),
@@ -1447,6 +1449,7 @@ impl BlockDevice {
             is_read_only: false,
             direct_io: false,
             sync_mode: SyncMode::default(),
+            parallel_reads: false,
         })
     }
 
@@ -1458,6 +1461,11 @@ impl BlockDevice {
     /// Set whether to bypass the host caches.
     pub fn set_direct_io(&mut self, direct_io: bool) {
         self.direct_io = direct_io;
+    }
+
+    /// Set whether to service block read requests in parallel.
+    pub fn set_parallel_reads(&mut self, parallel_reads: bool) {
+        self.parallel_reads = parallel_reads;
     }
 
     /// Set whether to enable VIRTIO_BLK_F_FLUSH.
