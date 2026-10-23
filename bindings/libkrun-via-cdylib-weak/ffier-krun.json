@@ -1904,6 +1904,21 @@
             "return_kind": "void"
           },
           "ffi_name": "krun_block_device_set_sync_mode"
+        },
+        {
+          "name": "set_parallel_reads",
+          "receiver": "mut",
+          "params": [
+            {
+              "name": "parallel_reads",
+              "param_kind": "regular",
+              "type": "bool"
+            }
+          ],
+          "ret": {
+            "return_kind": "void"
+          },
+          "ffi_name": "krun_block_device_set_parallel_reads"
         }
       ],
       "cfg": "feature = \"blk\""

@@ -64,6 +64,7 @@ pub struct BlockWorker {
     mem: GuestMemoryMmap,
     disk: DiskProperties,
     stop_fd: EventFd,
+    parallel_reads: bool,
 }
 
 impl BlockWorker {
@@ -73,6 +74,7 @@ impl BlockWorker {
         mem: GuestMemoryMmap,
         disk: DiskProperties,
         stop_fd: EventFd,
+        parallel_reads: bool,
     ) -> Self {
         Self {
             device_queue,
@@ -80,6 +82,7 @@ impl BlockWorker {
             mem,
             disk,
             stop_fd,
+            parallel_reads,
         }
     }
 

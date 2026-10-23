@@ -259,6 +259,7 @@ pub struct Block {
     // Implementation specific fields.
     pub(crate) id: String,
     pub(crate) partuuid: Option<String>,
+    parallel_reads: bool,
 }
 
 impl Block {
@@ -275,6 +276,7 @@ impl Block {
         is_disk_read_only: bool,
         direct_io: bool,
         sync_mode: SyncMode,
+        parallel_reads: bool,
     ) -> io::Result<Block> {
         let disk_image = OpenOptions::new()
             .read(true)
@@ -363,6 +365,7 @@ impl Block {
             device_state: DeviceState::Inactive,
             worker_thread: None,
             worker_stopfd: EventFd::new(EFD_NONBLOCK)?,
+            parallel_reads,
         })
     }
 
@@ -464,6 +467,7 @@ impl VirtioDevice for Block {
             mem.clone(),
             disk,
             self.worker_stopfd.try_clone().unwrap(),
+            self.parallel_reads,
         );
         self.worker_thread = Some(worker.run());
 
