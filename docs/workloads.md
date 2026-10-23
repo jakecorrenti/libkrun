@@ -25,7 +25,7 @@ Boots standard operating system disk images (e.g. Fedora CoreOS, Ubuntu, Debian)
 
 - **Boot Source**: `Payload::load_firmware(path, cmdline)` / `krun_payload_load_firmware` (UEFI firmware binary, such as OVMF or EDK2).
 - **Guest Operating System**: Standard guest OS kernel, initrd, and init system (e.g. `systemd`) loaded directly from the disk image by EFI firmware. Neither `krun-init` nor `libkrunfw` are involved in this model.
-- **Storage**: Primary OS disk attached via `BlockDevice` (raw or qcow2 format).
+- **Storage**: Primary OS disk attached via `BlockDevice` (raw or qcow2 format), with optional [parallel reads](virtio-blk.md).
 - **Networking**: Virtual network interface via `NetDevice` (typically connected to `gvproxy` on macOS).
 - **Consumers**: [`krunkit`](https://github.com/containers/krunkit) (used by Podman machine on macOS for GPU-enabled VM virtualization).
 
