@@ -191,32 +191,38 @@ impl BlockWorker {
                 }
             };
 
-            let (status, len): (u8, usize) =
-                match self.process_request(request_header, &mut reader, &mut writer) {
-                    Ok(l) => (VIRTIO_BLK_S_OK.try_into().unwrap(), l),
-                    Err(e) => {
-                        error!("error processing request: {e:?}");
-                        (VIRTIO_BLK_S_IOERR.try_into().unwrap(), 0)
-                    }
-                };
+            let result = self.process_request(request_header, &mut reader, &mut writer);
+            self.complete_request(mem, head.index, &mut writer, result);
+        }
+    }
 
-            if let Err(e) = writer.write_obj(status) {
-                error!("Failed to write virtio block status: {e:?}")
+    fn complete_request(
+        &mut self,
+        mem: &GuestMemoryMmap,
+        index: u16,
+        writer: &mut Writer,
+        result: result::Result<usize, RequestError>,
+    ) {
+        let (status, len): (u8, usize) = match result {
+            Ok(len) => (VIRTIO_BLK_S_OK as u8, len),
+            Err(e) => {
+                error!("error processing request: {e:?}");
+                (VIRTIO_BLK_S_IOERR as u8, 0)
             }
+        };
 
-            if let Err(e) = self
-                .device_queue
-                .queue
-                .add_used(mem, head.index, len as u32)
-            {
-                error!("failed to add used elements to the queue: {e:?}");
-            }
+        if let Err(e) = writer.write_obj(status) {
+            error!("Failed to write virtio block status: {e:?}")
+        }
 
-            if self.device_queue.queue.needs_notification(mem).unwrap()
-                && let Err(e) = self.interrupt.try_signal_used_queue()
-            {
-                error!("error signalling queue: {e:?}");
-            }
+        if let Err(e) = self.device_queue.queue.add_used(mem, index, len as u32) {
+            error!("failed to add used elements to the queue: {e:?}");
+        }
+
+        if self.device_queue.queue.needs_notification(mem).unwrap()
+            && let Err(e) = self.interrupt.try_signal_used_queue()
+        {
+            error!("error signalling queue: {e:?}");
         }
     }
 
