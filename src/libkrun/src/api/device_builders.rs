@@ -1431,6 +1431,7 @@ pub struct BlockDevice {
     direct_io: bool,
     sync_mode: SyncMode,
     parallel_reads: bool,
+    read_pool_size: Option<usize>,
 }
 
 #[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"blk\""))]
@@ -1449,6 +1450,7 @@ impl BlockDevice {
             direct_io: false,
             sync_mode: SyncMode::default(),
             parallel_reads: false,
+            read_pool_size: None,
         })
     }
 
@@ -1473,6 +1475,10 @@ impl BlockDevice {
     pub fn set_parallel_reads(&mut self, parallel_reads: bool) {
         self.parallel_reads = parallel_reads;
     }
+
+    pub fn set_read_pool_size(&mut self, read_pool_size: usize) {
+        self.read_pool_size = Some(read_pool_size);
+    }
 }
 
 #[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"blk\""))]
@@ -1492,6 +1498,7 @@ impl<'a> AttachDevice<'a> for BlockDevice {
             self.direct_io,
             self.sync_mode,
             self.parallel_reads,
+            self.read_pool_size,
         )
         .map_err(|e| VmmError::Internal(format!("block: {e}")))?;
 

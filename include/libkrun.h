@@ -544,6 +544,8 @@ void krun_block_device_set_sync_mode(KrunBlockDevice handle, uint32_t sync_mode)
 typedef void (*krun_block_device_set_sync_mode_fn)(KrunBlockDevice handle, uint32_t sync_mode);
 void krun_block_device_set_parallel_reads(KrunBlockDevice handle, bool parallel_reads);
 typedef void (*krun_block_device_set_parallel_reads_fn)(KrunBlockDevice handle, bool parallel_reads);
+void krun_block_device_set_read_pool_size(KrunBlockDevice handle, size_t read_pool_size);
+typedef void (*krun_block_device_set_read_pool_size_fn)(KrunBlockDevice handle, size_t read_pool_size);
 void krun_block_device_destroy(KrunBlockDevice handle);
 typedef void (*krun_block_device_destroy_fn)(KrunBlockDevice handle);
 

@@ -65,6 +65,7 @@ pub struct BlockWorker {
     disk: DiskProperties,
     stop_fd: EventFd,
     parallel_reads: bool,
+    read_pool_size: Option<usize>,
 }
 
 impl BlockWorker {
@@ -75,6 +76,7 @@ impl BlockWorker {
         disk: DiskProperties,
         stop_fd: EventFd,
         parallel_reads: bool,
+        read_pool_size: Option<usize>,
     ) -> Self {
         Self {
             device_queue,
@@ -83,6 +85,7 @@ impl BlockWorker {
             disk,
             stop_fd,
             parallel_reads,
+            read_pool_size,
         }
     }
 
