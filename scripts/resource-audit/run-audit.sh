@@ -23,6 +23,7 @@ INCLUDEDIR="$PREFIX/include"
 
 HARNESS="$SCRIPT_DIR/build/krun-harness"
 PAUSE="$SCRIPT_DIR/build/pause"
+LABEL_SHIM="$SCRIPT_DIR/build/mmap-label.so"
 CLK_TCK=$(getconf CLK_TCK)
 
 CONFIG_FILE="$SCRIPT_DIR/tests.conf"
@@ -39,7 +40,11 @@ SELECTED=()
 DEFAULT_APPEND_CMDLINE=""
 PAUSE_BUILD_CMD=""
 HARNESS_BUILD_CMD=""
+LABEL_SHIM_BUILD_CMD=""
+STRACE_K_OK=0
+STRACE_KILL_OK=0
 CURRENT_PID=""
+CURRENT_PG=""
 COMPLETED=()
 
 usage() {
@@ -80,8 +85,14 @@ die() {
 cleanup() {
     if [[ -n "$CURRENT_PID" ]] && kill -0 "$CURRENT_PID" 2>/dev/null; then
         kill -TERM "$CURRENT_PID" 2>/dev/null || true
+        if [[ -n "$CURRENT_PG" ]]; then
+            kill -TERM -- "-$CURRENT_PG" 2>/dev/null || true
+        fi
         sleep 0.5
         kill -KILL "$CURRENT_PID" 2>/dev/null || true
+        if [[ -n "$CURRENT_PG" ]]; then
+            kill -KILL -- "-$CURRENT_PG" 2>/dev/null || true
+        fi
     fi
 }
 
@@ -137,6 +148,22 @@ build_binaries() {
         "$CC" -O2 -I"$INCLUDEDIR" "$SCRIPT_DIR/harness.c" -o "$HARNESS" \
             -L"$LIBDIR" -lkrun -lkrun_init -Wl,-rpath,"$LIBDIR"
         HARNESS_BUILD_CMD="$CC -O2 -I$INCLUDEDIR harness.c -o build/krun-harness -L$LIBDIR -lkrun -lkrun_init -Wl,-rpath,$LIBDIR"
+    fi
+
+    if [[ ! -f "$LABEL_SHIM" || "$SCRIPT_DIR/mmap-label.c" -nt "$LABEL_SHIM" || $REBUILD -eq 1 ]]; then
+        "$CC" -O2 -shared -fPIC -o "$LABEL_SHIM" "$SCRIPT_DIR/mmap-label.c" -ldl
+        LABEL_SHIM_BUILD_CMD="$CC -O2 -shared -fPIC -o build/mmap-label.so mmap-label.c -ldl"
+    fi
+
+    # Not every strace build knows -k (syscall callstacks) or
+    # --kill-on-exit; probe once.
+    if command -v strace >/dev/null 2>&1; then
+        if strace -k -e trace=none true >/dev/null 2>&1; then
+            STRACE_K_OK=1
+        fi
+        if strace --kill-on-exit -e trace=none true >/dev/null 2>&1; then
+            STRACE_KILL_OK=1
+        fi
     fi
 }
 
@@ -205,6 +232,19 @@ take_final_snapshot() { # take_final_snapshot PID TEST_DIR
     for t in /proc/$pid/task/*; do
         [[ -d "$t" ]] || continue
         printf '%s %s\n' "${t##*/}" "$(cat "$t/comm" 2>/dev/null)" >> "$dir/threads.txt"
+    done
+
+    # One "tid comm sp" line per task. The sp is the user stack pointer from
+    # the thread's blocked syscall (/proc/.../syscall, field 8): stat's
+    # startstack is mm-wide (the same main-stack value for every thread) and
+    # cannot attribute per-thread stacks. Threads not in a syscall report 0.
+    : > "$dir/task-stats.txt"
+    local tid sp
+    for t in /proc/$pid/task/*; do
+        [[ -d "$t" ]] || continue
+        tid=${t##*/}
+        sp=$(awk '{ print $8 }' "$t/syscall" 2>/dev/null) || sp=""
+        printf '%s %s %s\n' "$tid" "$(cat "$t/comm" 2>/dev/null)" "${sp:-0}" >> "$dir/task-stats.txt"
     done
 
     {
@@ -441,6 +481,29 @@ write_summary() { # write_summary TEST_DIR NAME VCPUS RAM_MIB TRANSPORT PAYLOAD 
         echo "cpu_sys_s=$s2"
         echo "cpu_guest_s=$g2"
     } > "$test_dir/metrics.txt"
+
+    # Verbose annotated memory map, category data and charts.
+    if [[ -f "$test_dir/final-smaps.txt" ]]; then
+        if command -v python3 >/dev/null 2>&1; then
+            local totals=""
+            if totals=$(python3 "$SCRIPT_DIR/annotate-maps.py" "$test_dir" \
+                    --name "$name" --ram-mib "$ram_mib" 2>/dev/null); then
+                {
+                    echo
+                    echo "[Total memory breakdown]"
+                    echo "$totals"
+                    echo
+                    echo "Annotated memory map: $test_dir/maps-annotated.txt"
+                    echo "Category data:        $test_dir/categories.csv"
+                    echo "Charts:               $test_dir/charts/"
+                } >> "$test_dir/summary.txt"
+            else
+                echo "(annotate-maps.py failed; run it by hand for the error)" >> "$test_dir/summary.txt"
+            fi
+        else
+            echo "(python3 not found — annotated memory map and charts skipped)" >> "$test_dir/summary.txt"
+        fi
+    fi
 }
 
 write_run_summary() {
@@ -509,6 +572,12 @@ write_meta() {
         echo "  first, then $LIBDIR — an alternative libkrunfw.so.5 build placed earlier wins."
         echo "harness build: ${HARNESS_BUILD_CMD:-cached from previous run}"
         echo "pause build: ${PAUSE_BUILD_CMD:-cached from previous run}"
+        echo "mmap-label shim: ${LABEL_SHIM_BUILD_CMD:-cached from previous run}"
+        if command -v strace >/dev/null 2>&1; then
+            echo "strace: $(command -v strace) (callstacks: $([[ $STRACE_K_OK -eq 1 ]] && echo yes || echo no))"
+        else
+            echo "strace: not installed"
+        fi
         echo "settle=${SETTLE}s duration=${DURATION}s interval=${INTERVAL}s"
         echo "CONFIG_ANON_VMA_NAME: $anon_labels — when unset, anonymous mappings carry no"
         echo "  [anon:...] labels in smaps even with GLIBC_TUNABLES=glibc.mem.decorate_maps=1;"
@@ -534,11 +603,16 @@ run_test() { # run_test NAME — returns nonzero if the test failed
     local log_path=""
     local ready_marker="AUDIT_GUEST_READY"
     local settle=$SETTLE duration=$DURATION interval=$INTERVAL
+    local strace=0 label_mmap=0
     local -a extra_env=()
 
     mkdir -p "$test_dir"
     local TEST_DIR="$test_dir"
     "$func"
+
+    if [[ ${KRUN_AUDIT_LABEL_MMAP:-0} == 1 ]]; then
+        label_mmap=1
+    fi
 
     [[ "$vcpus" =~ ^[0-9]+$ ]] || die "test $name: vcpus='$vcpus' is not a number"
     [[ "$ram_mib" =~ ^[0-9]+$ ]] || die "test $name: ram_mib='$ram_mib' is not a number"
@@ -615,6 +689,9 @@ run_test() { # run_test NAME — returns nonzero if the test failed
         echo "LD_LIBRARY_PATH=$ld_path"
         echo "GLIBC_TUNABLES=glibc.mem.decorate_maps=1"
         for kv in "${extra_env[@]}"; do echo "$kv"; done
+        echo "# knobs"
+        echo "strace=$strace"
+        echo "label_mmap=$label_mmap"
         echo "# launched with cwd $test_dir"
         printf 'cmdline:'
         printf ' %q' "$HARNESS" "${args[@]}"
@@ -622,15 +699,63 @@ run_test() { # run_test NAME — returns nonzero if the test failed
     } > "$test_dir/cmd.txt"
 
     local -a env_cmd=(env LD_LIBRARY_PATH="$ld_path" GLIBC_TUNABLES=glibc.mem.decorate_maps=1)
+    if [[ $label_mmap -eq 1 ]]; then
+        env_cmd+=("LD_PRELOAD=$LABEL_SHIM")
+    fi
     env_cmd+=("${extra_env[@]}")
     env_cmd+=("$HARNESS" "${args[@]}")
 
+    # strace runs as the direct parent, so ptrace_scope is not an issue.
+    # strace merely detaches on SIGTERM, so either ask it to kill its tracees
+    # (--kill-on-exit) or put the whole tree in its own process group.
+    local -a launch_cmd=("${env_cmd[@]}")
+    local launcher_pg=""
+    if [[ $strace -eq 1 ]]; then
+        if ! command -v strace >/dev/null 2>&1; then
+            die "test $name: strace=1 but strace is not installed"
+        fi
+        launch_cmd=(strace -f)
+        if [[ $STRACE_K_OK -eq 1 ]]; then
+            launch_cmd+=(-k)
+        else
+            echo "  note: this strace does not support -k; mmap callstacks disabled"
+        fi
+        launch_cmd+=(-e trace=mmap,mprotect,munmap,open,openat,openat2,prctl -o "$test_dir/strace.log")
+        if [[ $STRACE_KILL_OK -eq 1 ]]; then
+            launch_cmd+=(--kill-on-exit)
+        else
+            launch_cmd=(setsid "${launch_cmd[@]}")
+            launcher_pg=1
+        fi
+        launch_cmd+=("${env_cmd[@]}")
+    fi
+
     (
         cd "$test_dir"
-        exec "${env_cmd[@]}" </dev/null >"$console_log" 2>&1
+        exec "${launch_cmd[@]}" </dev/null >"$console_log" 2>&1
     ) &
     local pid=$!
     CURRENT_PID=$pid
+    CURRENT_PG=""
+    if [[ -n "$launcher_pg" ]]; then
+        CURRENT_PG=$pid
+    fi
+
+    # Under strace, $pid is the tracer; sampling must target the VM process.
+    # strace's only child is env, which execs the harness without forking, so
+    # the first child pid is the harness's own.
+    local vm_pid=$pid
+    if [[ $strace -eq 1 ]]; then
+        local tries=0 child=""
+        while (( tries < 20 )) && [[ -z "$child" ]]; do
+            child=$(awk '{ print $1 }' "/proc/$pid/task/$pid/children" 2>/dev/null) || child=""
+            if [[ -z "$child" ]]; then
+                sleep 0.1
+                tries=$((tries + 1))
+            fi
+        done
+        vm_pid=${child:-$pid}
+    fi
 
     local launch_time=$EPOCHREALTIME
     local result="OK" reason="" ready_after=""
@@ -641,7 +766,7 @@ run_test() { # run_test NAME — returns nonzero if the test failed
                 ready_after=$(elapsed_between "$launch_time")
                 break
             fi
-            if ! proc_alive "$pid"; then
+            if ! proc_alive "$vm_pid" || ! proc_alive "$pid"; then
                 result="FAILED"
                 reason="harness exited before the readiness marker (see guest-console.log)"
                 break
@@ -656,7 +781,7 @@ run_test() { # run_test NAME — returns nonzero if the test failed
     else
         # Firmware payloads boot themselves; there is no marker to wait for.
         sleep "$settle"
-        if proc_alive "$pid"; then
+        if proc_alive "$vm_pid"; then
             ready_after="n/a"
         else
             result="FAILED"
@@ -673,7 +798,7 @@ run_test() { # run_test NAME — returns nonzero if the test failed
         if (( n < 1 )); then n=1; fi
         local i
         for ((i = 0; i < n; i++)); do
-            if ! sample_once "$pid" "$samples" "$sample_start"; then
+            if ! sample_once "$vm_pid" "$samples" "$sample_start"; then
                 result="FAILED"
                 reason="harness exited during sampling"
                 break
@@ -684,23 +809,30 @@ run_test() { # run_test NAME — returns nonzero if the test failed
         done
     fi
 
-    if proc_alive "$pid"; then
-        take_final_snapshot "$pid" "$test_dir"
+    if proc_alive "$vm_pid"; then
+        take_final_snapshot "$vm_pid" "$test_dir"
     fi
 
-    if proc_alive "$pid"; then
-        kill -TERM "$pid" 2>/dev/null || true
+    if proc_alive "$pid" || proc_alive "$vm_pid"; then
+        kill -TERM "$pid" "$vm_pid" 2>/dev/null || true
+        if [[ -n "$launcher_pg" ]]; then
+            kill -TERM -- "-$pid" 2>/dev/null || true
+        fi
         local waited=0
-        while proc_alive "$pid" && (( waited < 100 )); do
+        while (proc_alive "$pid" || proc_alive "$vm_pid") && (( waited < 100 )); do
             sleep 0.1
             waited=$((waited + 1))
         done
-        if proc_alive "$pid"; then
-            kill -KILL "$pid" 2>/dev/null || true
+        if proc_alive "$pid" || proc_alive "$vm_pid"; then
+            kill -KILL "$pid" "$vm_pid" 2>/dev/null || true
+            if [[ -n "$launcher_pg" ]]; then
+                kill -KILL -- "-$pid" 2>/dev/null || true
+            fi
         fi
     fi
     wait "$pid" 2>/dev/null || true
     CURRENT_PID=""
+    CURRENT_PG=""
 
     write_summary "$test_dir" "$name" "$vcpus" "$ram_mib" "$transport" "$payload" \
         "$root_mode" "$devices" "$result" "$reason" "$ready_after" "$duration" "$interval"

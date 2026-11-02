@@ -27,12 +27,14 @@ tears the VM down and writes a report. Results land in
 `results/<YYYYMMDD-HHMMSS>/<test>/`; the run-level comparison table is
 `results/<runid>/summary.md`.
 
-Requirements: bash ≥ 5, gcc/cc, awk, and a usable `/dev/kvm`. libkrun and
-friends are expected in `$KRUN_AUDIT_PREFIX/lib64` (default `/usr/local`).
-The harness is linked with an rpath for `libkrun.so`/`libkrun_init.so`, but
-`libkrunfw.so.5` is `dlopen`ed by soname at payload-load time, so the driver
-also sets `LD_LIBRARY_PATH` — keep that in mind when launching the harness by
-hand.
+Requirements: bash ≥ 5, gcc/cc, awk, python3 (for the annotated memory map
+and charts; without it the run still works and says so) and a usable
+`/dev/kvm`. `strace` is optional (needed only for `strace=1` tests). libkrun
+and friends are expected in `$KRUN_AUDIT_PREFIX/lib64` (default
+`/usr/local`). The harness is linked with an rpath for
+`libkrun.so`/`libkrun_init.so`, but `libkrunfw.so.5` is `dlopen`ed by soname
+at payload-load time, so the driver also sets `LD_LIBRARY_PATH` — keep that
+in mind when launching the harness by hand.
 
 ## How the guest is booted
 
@@ -79,6 +81,8 @@ stdio redirected to `guest-console.log` and samples the process from outside.
 | `run-audit.sh` | driver: build, launch, readiness, sampling, reports |
 | `tests.conf` | the test matrix — edit this to add configurations |
 | `parse-smaps.awk` | smaps → per-mapping rows, guest-RAM ID, category rollup |
+| `annotate-maps.py` | verbose annotated memory map, category CSV, SVG charts |
+| `mmap-label.c` | LD_PRELOAD shim naming anonymous mmaps after their callers |
 
 Build artifacts go to `build/`, results to `results/` (both untracked).
 
@@ -114,16 +118,114 @@ Per test (`results/<runid>/<test>/`):
 | file | content |
 |------|---------|
 | `guest-console.log` | kernel + init + workload console output (the marker) |
-| `cmd.txt` | exact environment and harness command line |
+| `cmd.txt` | exact environment, knobs and harness command line |
 | `samples.csv` | one row per sampling interval (see header) |
 | `final-status.txt`, `final-smaps.txt`, `final-smaps_rollup.txt`, `final-maps.txt`, `final-io.txt` | `/proc` snapshot taken right before teardown |
-| `fds.txt`, `threads.txt`, `libs.txt` | fd targets, thread names, resolved krun libraries |
+| `fds.txt`, `threads.txt`, `task-stats.txt`, `libs.txt` | fd targets, thread names, per-thread stack pointers, resolved krun libraries |
 | `parsed-smaps.tsv` | `parse-smaps.awk` output for the final snapshot |
-| `summary.txt` | the per-test report |
+| `summary.txt` | the per-test report (ends with the `[Total memory breakdown]` block) |
 | `metrics.txt` | machine-readable key=value pairs feeding the run table |
+| `maps-annotated.txt`, `categories.csv`, `charts/` | verbose annotated map, category data, SVG charts (see below) |
+| `strace.log` | only for `strace=1` tests: traced syscalls with callstacks |
 
 Run-level: `summary.md` (comparison table, one row per test) and `meta.txt`
 (host, resolved library paths, build commands, timing, kernel-config notes).
+
+## Annotated memory map, labels and charts
+
+Every test's snapshot also feeds `annotate-maps.py` (stdlib python3, no
+dependencies), which produces the article-style *verbose* view that the
+coarse `summary.txt` rollup cannot show:
+
+- **`maps-annotated.txt`** — every mapping, sorted by address, one row per
+  VMA: `size(KB) address_range perm offset dev inode pathname/[label]
+  rss(KB) dirty(KB) anon(KB)`, blank lines between groups. File-backed rows
+  carry ELF segment annotations (`/usr/lib64/libc.so.6 <.text .plt>`); the
+  kernel blob inside `libkrunfw.so` shows up as its `.data` section.
+  Anonymous and pseudo mappings carry inferred labels: `[guest RAM
+  (merged-size match)]`, `[thread stack: fc_vcpu 0]`, `[glibc: malloc
+  arena]` / `[glibc: arena reservation]`, `[.bss: libc.so.6]`,
+  `[guard page]`, `[anon]` / `[anon] (empty reservation)`. The footer
+  carries pymap-style totals (VSZ, empty reservations, RSS, RssFile,
+  RssAnon, dirty, anonymous) which are also appended to `summary.txt` under
+  `[Total memory breakdown]`.
+- **`categories.csv`** — reservation / RSS / anonymous KiB per category with
+  percentages of the run's totals. This is the data for the article's pie
+  charts; the categories refine the `parse-smaps.awk` rollup (keeping the
+  shared names) with `libkrun_init.so`, `thread-stacks`, `glibc-arena`,
+  `guard`, `memfd` and `vdso`.
+- **`charts/`** — hand-written SVGs, no plotting libraries:
+  `<test>-reservations-pie.svg` and `<test>-rss-pie.svg` (donut by category,
+  top 9 + "other", legend with KiB and %, total in the center) and
+  `<test>-reservations-ro-rw.svg` (horizontal stacked bars per category:
+  read-only vs read-write vs `---p` reservations).
+
+`annotate-maps.py` can be run by hand on any snapshot:
+`annotate-maps.py TEST_DIR --name NAME --ram-mib N [--no-charts]`.
+
+### The three labeling tiers
+
+The QEMU article could name anonymous mappings because its author ran a
+kernel built with `CONFIG_ANON_VMA_NAME=y` and instrumented QEMU itself.
+This toolset gets as close as possible without patching libkrun:
+
+1. **Inference (default, works everywhere).** What the annotator does on
+   every run: ELF program/section headers are parsed directly from the
+   mapped files (`struct`, no readelf), thread stacks are located through
+   each task's user stack pointer (from `/proc/PID/task/TID/syscall` —
+   stat's `startstack` is mm-wide and identical for every thread, so it
+   cannot attribute stacks; Rust/glibc stacks are allocated back to back
+   and merged into one VMA, which the annotator splits between the
+   observed stack pointers), glibc arenas are recognized by their
+   rw-head + `---p`-tail 64 MiB pattern, and guest RAM by size
+   (`ram`, `ram+16 MiB` for the merged low-region VMA, else largest anon).
+2. **glibc labels.** `GLIBC_TUNABLES=glibc.mem.decorate_maps=1` is exported
+   for every harness run, so on a kernel built with
+   `CONFIG_ANON_VMA_NAME=y` glibc names its arenas and stacks
+   `[anon:glibc]`-style in smaps automatically. Fedora kernels ship
+   *without* that option, which is why this tier is inert here. Short
+   recipe to enable it: build a kernel with `CONFIG_ANON_VMA_NAME=y`
+   (it's a plain bool under CONFIG_ANON_VMA_NAME in mm/Kconfig), install
+   and boot it, then re-run the audit — no other change is needed.
+3. **VMM allocation attribution.** `label_mmap=1` in a test (or
+   `KRUN_AUDIT_LABEL_MMAP=1` in the environment for all tests) adds
+   `build/mmap-label.so` to the harness's `LD_PRELOAD`. The shim names
+   every anonymous `mmap()` after its caller —
+   `[anon: libkrun.so.2.0.0: <symbol>+0x123]` — using `dladdr` on the
+   return address. It also requires a kernel with
+   `CONFIG_ANON_VMA_NAME=y`; on kernels without it every `prctl` fails
+   with EINVAL and the shim is a silent no-op (verified here: runs with it
+   are identical to runs without). The article instead patched QEMU's
+   allocation call sites; the shim gets the same effect without touching
+   libkrun.
+
+### Tracing allocations with strace
+
+`strace=1` in a test (see the commented `test_minimal-strace` in
+`tests.conf`) launches the harness under
+`strace -f -k -e trace=mmap,mprotect,munmap,open,openat,openat2,prctl -o
+strace.log` (`-k` dropped with a note on strace builds without callstack
+support). This is how the article's callstack-style labels
+(`[qemu: qemu_thread_start > libc: tcache_init]`) were derived: each traced
+`mmap()` line in `strace.log` is followed by the stack of its caller, e.g.
+
+    mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7feffc065000
+     > /usr/lib64/ld-linux-x86-64.so.2(__mmap+0x2c) [0x2491c]
+     > /usr/lib64/ld-linux-x86-64.so.2(__minimal_malloc+0x90) [0xb960]
+     ...
+
+To attribute a mapping from `maps-annotated.txt`, take its address range
+and size, find the `mmap(…)` line in `strace.log` whose return value and
+length match, and read the backtrace beneath it (pair it with
+`mprotect`/`munmap` lines that reshape it afterwards). The driver runs
+strace as the harness's parent, so `ptrace_scope` is not an issue, and it
+asks strace to kill its tracees on exit so teardown stays clean.
+
+strace perturbs the run: boot is slower (raise `settle`, the commented
+example uses `settle=30`) and every traced syscall costs time. Keep strace
+rows out of performance comparisons — compare them only against each other.
+Note that the traced syscall set is deliberately narrow, so a mostly-KVM
+guest boots almost as fast as usual; the mapping churn is what gets traced.
 
 ## Configuring tests
 
@@ -233,10 +335,11 @@ device, a library, or the kernel.
   a match it takes the largest anonymous mapping ("largest-anon fallback").
   With the krunfw payload the low-memory region below the kernel load
   address and the main RAM region usually *merge* into one VMA of
-  RAM + 16 MiB, so in practice the fallback is the norm — it is safe because
-  guest RAM dwarfs every other anonymous mapping. The small low-memory
+  RAM + 16 MiB, so in practice the fallback is the norm there;
+  `annotate-maps.py` additionally recognizes that merged size explicitly
+  ("merged-size match"). The small low-memory
   region is included either way; residual ambiguity is well under 1 MiB. The
-  method used is printed in every summary.
+  method used is printed in every summary and annotated map.
 - **`vmm_private_anon` overstates pure VMM overhead for krunfw payloads** by
   the guest kernel's dirty `.data` inside `libkrunfw.so` (~16 MiB) — that
   memory belongs to the guest, not the VMM. The category rollup separates
