@@ -128,6 +128,7 @@ Per test (`results/<runid>/<test>/`):
 | `metrics.txt` | machine-readable key=value pairs feeding the run table |
 | `maps-annotated.txt`, `categories.csv`, `charts/` | verbose annotated map, category data, SVG charts (see below) |
 | `strace.log` | only for `strace=1` tests: traced syscalls with callstacks |
+| `samples-preboot.csv`, `preboot-*.{txt,smaps,maps,io}`, `preboot-maps-annotated.txt`, `preboot-categories.csv`, `charts/<test>-preboot-*.svg` | only for `pause_before_run` tests: the VMM-built phase (see below) |
 
 Run-level: `summary.md` (comparison table, one row per test) and `meta.txt`
 (host, resolved library paths, build commands, timing, kernel-config notes).
@@ -138,9 +139,15 @@ Every test's snapshot also feeds `annotate-maps.py` (stdlib python3, no
 dependencies), which produces the article-style *verbose* view that the
 coarse `summary.txt` rollup cannot show:
 
-- **`maps-annotated.txt`** — every mapping, sorted by address, one row per
-  VMA: `size(KB) address_range perm offset dev inode pathname/[label]
-  rss(KB) dirty(KB) anon(KB)`, blank lines between groups. File-backed rows
+- **`maps-annotated.txt`** — a pymap-style multi-section report. Section 1
+  is the full map: every mapping, sorted by address, one row per VMA:
+  `size(KB) address_range perm offset dev inode pathname/[label] rss(KB)
+  dirty(KB) anon(KB) pss(KB) uss(KB)`, blank lines between groups. Then
+  `Segments (excluding empty reservations)` (Rss > 0, address order),
+  `Segments with RSS usage` (sorted by RSS), `Segments with Anonymous
+  memory` (sorted by anonymous) — each with its own totals footer — and a
+  final `Category breakdown` charge table
+  (`category | reservation | RO | RW | none | rss | anon`). File-backed rows
   carry ELF segment annotations (`/usr/lib64/libc.so.6 <.text .plt>`); the
   kernel blob inside `libkrunfw.so` shows up as its `.data` section.
   Anonymous and pseudo mappings carry inferred labels: `[guest RAM
@@ -150,15 +157,15 @@ coarse `summary.txt` rollup cannot show:
   `CONFIG_ANON_VMA_NAME=y`, kernel-assigned labels are used instead of (or
   augmented by) inference: `[thread stack: fc_vcpu 0 (tid 1234)]`,
   `[anon: glibc: malloc arena]`, `[guest RAM (merged-size match); krun:
-  libkrun.so.2+0x116158]`. The footer
-  carries pymap-style totals (VSZ, empty reservations, RSS, RssFile,
-  RssAnon, dirty, anonymous) which are also appended to `summary.txt` under
-  `[Total memory breakdown]`.
-- **`categories.csv`** — reservation / RSS / anonymous KiB per category with
-  percentages of the run's totals. This is the data for the article's pie
-  charts; the categories refine the `parse-smaps.awk` rollup (keeping the
-  shared names) with `libkrun_init.so`, `thread-stacks`, `glibc-arena`,
-  `guard`, `memfd` and `vdso`.
+  libkrun.so.2+0x116158]`. The section-1 totals are also appended to
+  `summary.txt` under `[Total memory breakdown]`.
+- **`categories.csv`** — per category: reservation KiB split into
+  `ro_res_kib` / `rw_res_kib` / `none_res_kib` (r--p/r-xp vs rw-p vs ---p),
+  RSS and anonymous KiB, with percentages of the run's totals. This is the
+  data for the article's pie charts; the categories refine the
+  `parse-smaps.awk` rollup (keeping the shared names) with
+  `libkrun_init.so`, `thread-stacks`, `glibc-arena`, `guard`, `memfd` and
+  `vdso`.
 - **`charts/`** — hand-written SVGs, no plotting libraries:
   `<test>-reservations-pie.svg` and `<test>-rss-pie.svg` (donut by category,
   top 9 + "other", legend with KiB and %, total in the center) and
@@ -210,6 +217,17 @@ This toolset gets as close as possible without patching libkrun:
    after mapping, so the `krun:` labels mostly mark libkrun's direct
    allocations — the guest RAM region above all.
 
+   The shim also interposes `malloc`/`calloc` and names allocations of at
+   least `KRUN_AUDIT_MALLOC_LABEL_KIB` KiB (default 128) as
+   `[anon:krun: malloc 1024KiB from <soname>+0x3f0]`, but only when the
+   containing VMA is still unnamed — arena- and heap-served allocations,
+   and chunks glibc already decorated (`glibc: malloc`), are left alone.
+   In practice this catches exactly the allocations glibc serves through
+   fresh mmaps. Forcing *more* allocations down that path with
+   `MALLOC_MMAP_THRESHOLD_` (via a test's `extra_env`) is deliberately
+   left to you: it increases label coverage but perturbs allocator
+   behavior, so such runs must not be compared against unmodified ones.
+
 Which of tiers 2 and 3 are actually available is recorded in `meta.txt`:
 `build/vma-probe` functionally checks `CONFIG_ANON_VMA_NAME` (the config
 files are often absent on custom kernels) by naming a page with
@@ -249,6 +267,40 @@ example uses `settle=30`) and every traced syscall costs time. Keep strace
 rows out of performance comparisons — compare them only against each other.
 Note that the traced syscall set is deliberately narrow, so a mostly-KVM
 guest boots almost as fast as usual; the mapping churn is what gets traced.
+
+## Phased measurement
+
+The article's "prior to main()" split asks how much of the footprint exists
+before the workload runs. The libkrun analog is *VMM built* (KVM VM, virtio
+devices, guest RAM mapped, kernel inserted — but the guest not yet
+executing) versus *guest running*. A test with `pause_before_run=SECS`
+(see `test_minimal-phased` in `tests.conf`) makes the harness print
+`AUDIT_PHASE_VMM_BUILT` to its stderr and hold the VM for SECS seconds
+after `krun_vmm_builder_build()`, before calling `krun_vmm_run()`.
+
+For such tests the driver:
+
+- waits for the phase marker, then samples `samples-preboot.csv` for the
+  pause window (stopping one second early — marker detection lags, and the
+  guest reaches readiness within ~0.2s of the sleep ending, so sampling
+  right up to the boundary would corrupt the split);
+- snapshots `preboot-status.txt`, `preboot-smaps.txt`, `preboot-maps.txt`
+  and `preboot-io.txt`;
+- annotates the pre-boot snapshot separately: `preboot-maps-annotated.txt`,
+  `preboot-categories.csv` and `charts/<test>-preboot-*.svg`;
+- adds a `[Phase: VMM built, before guest start]` section to `summary.txt`
+  and a `boot cost` line to `[Derived]`.
+
+Reading the split: the pre-boot numbers are the pure VMM cost with the
+kernel image in place but untouched — the guest RAM region is mapped yet
+nearly empty, and `libkrunfw.so`'s kernel blob is still clean file cache.
+The `boot cost` line (VmRSS and anonymous growth between the phases) is
+what *running* the guest costs on top: the guest kernel decompressing
+itself into RAM, populating its structures, and dirtying the shared kernel
+image's `.data` (COW). Compare the two `categories.csv` files to see which
+categories moved. Expect a much smaller delta between the phases for an
+external-kernel payload (the kernel image is copied into guest RAM before
+the phase boundary, so it is already counted pre-boot).
 
 ## Configuring tests
 
