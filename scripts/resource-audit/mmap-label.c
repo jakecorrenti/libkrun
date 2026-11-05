@@ -1,13 +1,16 @@
 /*
  * Experimental LD_PRELOAD shim for the resource-audit toolset: names every
  * anonymous mmap() after its caller, so a kernel with CONFIG_ANON_VMA_NAME
- * shows [anon: <soname>: <symbol>+0x<off>] labels in smaps — the same
+ * shows [anon:krun: <soname>: <symbol>+0x<off>] labels in smaps — the same
  * attribution the QEMU resource-audit article got by patching QEMU, but
  * without touching libkrun.
  *
- * prctl(PR_SET_VMA, ...) failing is expected and silently ignored: distro
- * kernels (this host included) ship without CONFIG_ANON_VMA_NAME, where
- * every call returns EINVAL and the shim is a harmless no-op.
+ * Names must not contain '[' or ']' (the kernel reserves those for its own
+ * [heap]/[stack] smaps pseudo-entries and rejects them), hence the unwrapped
+ * "krun:" prefix; the kernel adds the [anon:...] display wrapper itself.
+ * prctl failing is expected and silently ignored on kernels built without
+ * CONFIG_ANON_VMA_NAME, where the shim is a harmless no-op — probe with
+ * build/vma-probe to check.
  */
 
 #define _GNU_SOURCE
@@ -38,14 +41,14 @@ static void name_mapping(void *addr, size_t len, void *caller)
         base = base != NULL ? base + 1 : info.dli_fname;
         if (info.dli_sname != NULL) {
             off = (unsigned long)((char *)caller - (char *)info.dli_saddr);
-            snprintf(name, sizeof(name), "[anon: %s: %s+0x%lx]",
+            snprintf(name, sizeof(name), "krun: %s: %s+0x%lx",
                      base, info.dli_sname, off);
         } else {
             off = (unsigned long)((char *)caller - (char *)info.dli_fbase);
-            snprintf(name, sizeof(name), "[anon: %s+0x%lx]", base, off);
+            snprintf(name, sizeof(name), "krun: %s+0x%lx", base, off);
         }
     } else {
-        snprintf(name, sizeof(name), "[anon: mmap caller 0x%lx]",
+        snprintf(name, sizeof(name), "krun: mmap caller 0x%lx",
                  (unsigned long)caller);
     }
 

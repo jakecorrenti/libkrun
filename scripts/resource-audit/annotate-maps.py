@@ -11,8 +11,13 @@ and writes into TEST_DIR:
 
 Annotations are inferred from what the kernel exposes: ELF sections for
 file-backed mappings, thread stacks from per-task user stack pointers,
-glibc arena pairs by their 64 MiB pattern, and guest RAM by size. stdout
-carries only the totals block; run-audit.sh appends it to summary.txt.
+glibc arena pairs by their 64 MiB pattern, and guest RAM by size. When the
+kernel itself labels anonymous mappings (CONFIG_ANON_VMA_NAME — glibc's
+decorate_maps names, the label_mmap shim's "krun:" names), the kernel label
+is the base: it is passed through verbatim, augmented where noted (thread
+stacks get their comm, guest RAM keeps its identification), and the
+inference passes only run on unlabeled mappings. stdout carries only the
+totals block; run-audit.sh appends it to summary.txt.
 """
 
 import argparse
@@ -28,6 +33,9 @@ GUEST_RAM_LOW_KIB = 16 * KiB  # x86_64 kernel load address below main RAM
 
 SMAPS_HEADER = re.compile(r"^([0-9a-f]+)-([0-9a-f]+) (\S{4}) (\S+) (\S+) (\d+) *(\S*.*)$")
 KB_LINE = re.compile(r"^(\w+):\s+(\d+) kB$")
+# Named anonymous mappings show up as [anon:<name>]; glibc's names carry a
+# leading space ("[anon: glibc: malloc]"), so tolerate one when unwrapping.
+KERNEL_ANON_RE = re.compile(r"^\[anon:\s*(.*?)\s*\]$")
 
 PALETTE = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
            "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac"]
@@ -220,8 +228,29 @@ def elf_info(path, cache):
 
 # ----- annotation passes -----
 
+def kernel_name(v):
+    """The name the kernel carries for this mapping, or None.
+
+    Mappings named through prctl(PR_SET_VMA_ANON_NAME) — glibc's
+    decorate_maps names or the label_mmap shim's "krun:" names — display as
+    [anon:<name>]. A kernel label is the base for display and categorization;
+    the size/SP/pattern inference only runs on unlabeled mappings.
+    """
+    m = KERNEL_ANON_RE.match(v.path)
+    return m.group(1) if m else None
+
+
+def is_anon(v):
+    return v.path == "" or kernel_name(v) is not None
+
+
+def is_thread_stack(v):
+    return (v.label.startswith("[thread stack")
+            or (kernel_name(v) or "").startswith("glibc: pthread stack"))
+
+
 def mark_guest_ram(vmas, ram_kib):
-    anon_rw = [v for v in vmas if v.path == "" and v.perms.startswith("rw")]
+    anon_rw = [v for v in vmas if is_anon(v) and v.perms.startswith("rw")]
     targets = []
     method = "largest-anon fallback"
     for want, m in ((ram_kib, "exact-size match"),
@@ -232,9 +261,28 @@ def mark_guest_ram(vmas, ram_kib):
             break
     if not targets and anon_rw:
         targets = [max(anon_rw, key=lambda v: v.size)]
+    # The low-memory region below the kernel load address is guest RAM too;
+    # with per-mapping kernel labels the two RAM mmaps no longer merge.
+    if ram_kib != GUEST_RAM_LOW_KIB:
+        targets += [v for v in anon_rw
+                    if v.size == GUEST_RAM_LOW_KIB and v not in targets]
     for v in targets:
-        v.label = "[guest RAM (%s)]" % method
+        kn = kernel_name(v)
+        v.label = "[guest RAM (%s)%s]" % (method, "; " + kn if kn else "")
     return sum(v.rss for v in targets), method, len(targets)
+
+
+def enrich_glibc_stacks(vmas, tasks):
+    """glibc names thread stacks "glibc: pthread stack: <tid>" — attach the
+    comm from task-stats.txt so the map shows who owns each stack."""
+    comms = {tid: comm for tid, comm, _sp in tasks}
+    for v in vmas:
+        kn = kernel_name(v)
+        if kn is None:
+            continue
+        m = re.match(r"^glibc: pthread stack: (\d+)$", kn)
+        if m and m.group(1) in comms:
+            v.label = "[thread stack: %s (tid %s)]" % (comms[m.group(1)], m.group(1))
 
 
 def mark_thread_stacks(vmas, tasks):
@@ -273,7 +321,7 @@ def mark_thread_stacks(vmas, tasks):
 
 def mark_guards(vmas):
     for i, v in enumerate(vmas):
-        if not v.label.startswith("[thread stack"):
+        if not is_thread_stack(v):
             continue
         prev = vmas[i - 1] if i > 0 else None
         if (prev is not None and prev.path == "" and not prev.label
@@ -284,13 +332,23 @@ def mark_guards(vmas):
 def mark_arenas(vmas):
     for i in range(len(vmas) - 1):
         head, tail = vmas[i], vmas[i + 1]
-        if (head.path == "" and not head.label and head.perms.startswith("rw")
-                and tail.path == "" and not tail.label
-                and tail.perms.startswith("---")
-                and tail.start == head.end
-                and head.size + tail.size == ARENA_TOTAL_KIB):
+        if tail.start != head.end:
+            continue
+        if not is_anon(tail) or tail.label or not tail.perms.startswith("---"):
+            continue
+        if not is_anon(head) or head.label or not head.perms.startswith("rw"):
+            continue
+        if head.size + tail.size != ARENA_TOTAL_KIB:
+            continue
+        # glibc names the arena head itself; when only the shim named the
+        # initial reservation, claim both parts here.
+        kn = kernel_name(head)
+        if head.path == "":
             head.label = "[glibc: malloc arena]"
-            tail.label = "[glibc: arena reservation]"
+        elif kn and not kn.startswith("glibc: malloc arena"):
+            head.label = "[glibc: malloc arena; " + kn + "]"
+        tkn = kernel_name(tail)
+        tail.label = "[glibc: arena reservation%s]" % ("; " + tkn if tkn else "")
 
 
 def mark_bss(vmas, cache):
@@ -354,11 +412,29 @@ def _path_category(p):
         return "libkrun_init.so"
     if "libkrun.so" in p:
         return "libkrun.so"
-    if "/build/krun-harness" in p:
+    if "krun-harness" in p:
         return "harness"
     if p.endswith(".so") or ".so." in p or "ld-linux" in p:
         return "system-libs"
     return "other-file"
+
+
+def _kernel_label_category(kn):
+    if kn.startswith("glibc: malloc arena"):
+        return "glibc-arena"
+    if kn.startswith(("glibc: pthread stack", "glibc: unused stack")):
+        return "thread-stacks"
+    if kn.startswith("glibc: .bss "):
+        return _path_category(kn[len("glibc: .bss "):])
+    if kn.startswith("krun: "):
+        rest = kn[len("krun: "):]
+        if rest.startswith("mmap caller"):
+            return "other-anon"
+        # attribute the allocation to the library that made it
+        return _path_category(rest.split(":")[0].split("+")[0])
+    if kn.startswith("glibc:"):
+        return "system-libs"
+    return None
 
 
 def categorize(v):
@@ -368,7 +444,7 @@ def categorize(v):
         return "heap"
     if v.path == "[stack]":
         return "stack"
-    if v.label.startswith("[thread stack"):
+    if is_thread_stack(v):
         return "thread-stacks"
     if v.label == "[guard page]":
         return "guard"
@@ -376,6 +452,10 @@ def categorize(v):
         return "glibc-arena"
     if v.label.startswith("[.bss"):
         return _path_category(v.label[len("[.bss: "):-1])
+    kn = kernel_name(v)
+    if kn is not None:
+        cat = _kernel_label_category(kn)
+        return cat if cat is not None else "other-anon"
     if v.path:
         return _path_category(v.path)
     return "other-anon"
@@ -385,7 +465,7 @@ def categorize(v):
 
 def write_table(vmas, path):
     ordered = sorted(vmas, key=lambda v: v.start)
-    displays = [(v.path + " " + v.segments).strip() if v.path else v.label
+    displays = [v.label if v.label else (v.path + " " + v.segments).strip()
                 for v in ordered]
     # A fixed pathname width would let overflowing paths push the trailing
     # counters out of alignment, so the column is sized to its longest entry.
@@ -397,7 +477,7 @@ def write_table(vmas, path):
                            "rss(KB)", "dirty(KB)", "anon(KB)")]
     prev_group = None
     for v, display in zip(ordered, displays):
-        group = v.path if v.path else v.label.split(" (empty reservation)")[0]
+        group = (v.label if v.label else v.path).split(" (empty reservation)")[0]
         if prev_group is not None and group != prev_group:
             lines.append("")
         prev_group = group
@@ -578,6 +658,7 @@ def main():
     status = parse_status(os.path.join(d, "final-status.txt"))
 
     gram = mark_guest_ram(vmas, ram_mib * KiB)
+    enrich_glibc_stacks(vmas, tasks)
     vmas = mark_thread_stacks(vmas, tasks)
     mark_guards(vmas)
     mark_arenas(vmas)

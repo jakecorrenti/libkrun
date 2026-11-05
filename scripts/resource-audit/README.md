@@ -83,6 +83,7 @@ stdio redirected to `guest-console.log` and samples the process from outside.
 | `parse-smaps.awk` | smaps → per-mapping rows, guest-RAM ID, category rollup |
 | `annotate-maps.py` | verbose annotated memory map, category CSV, SVG charts |
 | `mmap-label.c` | LD_PRELOAD shim naming anonymous mmaps after their callers |
+| `vma-probe.c` | functional CONFIG_ANON_VMA_NAME probe (feeds meta.txt) |
 
 Build artifacts go to `build/`, results to `results/` (both untracked).
 
@@ -145,7 +146,11 @@ coarse `summary.txt` rollup cannot show:
   Anonymous and pseudo mappings carry inferred labels: `[guest RAM
   (merged-size match)]`, `[thread stack: fc_vcpu 0]`, `[glibc: malloc
   arena]` / `[glibc: arena reservation]`, `[.bss: libc.so.6]`,
-  `[guard page]`, `[anon]` / `[anon] (empty reservation)`. The footer
+  `[guard page]`, `[anon]` / `[anon] (empty reservation)`. On kernels with
+  `CONFIG_ANON_VMA_NAME=y`, kernel-assigned labels are used instead of (or
+  augmented by) inference: `[thread stack: fc_vcpu 0 (tid 1234)]`,
+  `[anon: glibc: malloc arena]`, `[guest RAM (merged-size match); krun:
+  libkrun.so.2+0x116158]`. The footer
   carries pymap-style totals (VSZ, empty reservations, RSS, RssFile,
   RssAnon, dirty, anonymous) which are also appended to `summary.txt` under
   `[Total memory breakdown]`.
@@ -174,30 +179,48 @@ This toolset gets as close as possible without patching libkrun:
    mapped files (`struct`, no readelf), thread stacks are located through
    each task's user stack pointer (from `/proc/PID/task/TID/syscall` —
    stat's `startstack` is mm-wide and identical for every thread, so it
-   cannot attribute stacks; Rust/glibc stacks are allocated back to back
-   and merged into one VMA, which the annotator splits between the
-   observed stack pointers), glibc arenas are recognized by their
+   cannot attribute stacks), glibc arenas are recognized by their
    rw-head + `---p`-tail 64 MiB pattern, and guest RAM by size
    (`ram`, `ram+16 MiB` for the merged low-region VMA, else largest anon).
+   These passes only run on mappings the kernel left unnamed.
 2. **glibc labels.** `GLIBC_TUNABLES=glibc.mem.decorate_maps=1` is exported
    for every harness run, so on a kernel built with
-   `CONFIG_ANON_VMA_NAME=y` glibc names its arenas and stacks
-   `[anon:glibc]`-style in smaps automatically. Fedora kernels ship
-   *without* that option, which is why this tier is inert here. Short
-   recipe to enable it: build a kernel with `CONFIG_ANON_VMA_NAME=y`
-   (it's a plain bool under CONFIG_ANON_VMA_NAME in mm/Kconfig), install
-   and boot it, then re-run the audit — no other change is needed.
+   `CONFIG_ANON_VMA_NAME=y` glibc names its own allocations in smaps:
+   `[anon: glibc: malloc arena]`, `[anon: glibc: pthread stack: <tid>]`
+   (enriched to `[thread stack: <comm> (tid <tid>)]` using
+   task-stats.txt), `[anon: glibc: .bss /lib64/libc.so.6]`,
+   `[anon: glibc: loader malloc]`, and similar. This tier is live on this
+   host's kernel; on kernels without the option it is inert. Recipe to
+   enable it elsewhere: build a kernel with `CONFIG_ANON_VMA_NAME=y`
+   (a plain bool in mm/Kconfig), install and boot it, then re-run the
+   audit — no other change is needed.
 3. **VMM allocation attribution.** `label_mmap=1` in a test (or
    `KRUN_AUDIT_LABEL_MMAP=1` in the environment for all tests) adds
-   `build/mmap-label.so` to the harness's `LD_PRELOAD`. The shim names
-   every anonymous `mmap()` after its caller —
-   `[anon: libkrun.so.2.0.0: <symbol>+0x123]` — using `dladdr` on the
-   return address. It also requires a kernel with
-   `CONFIG_ANON_VMA_NAME=y`; on kernels without it every `prctl` fails
-   with EINVAL and the shim is a silent no-op (verified here: runs with it
-   are identical to runs without). The article instead patched QEMU's
-   allocation call sites; the shim gets the same effect without touching
-   libkrun.
+   `build/mmap-label.so` to the harness's `LD_PRELOAD` (recorded in
+   cmd.txt). The shim names every anonymous `mmap()` after its caller —
+   displayed by the kernel as `[anon:krun: <soname>: <symbol>+0x123]` or
+   `[anon:krun: <soname>+0x123]` — using `dladdr` on the return address.
+   Names must not contain `[`/`]` (the kernel reserves those for its own
+   `[heap]`/`[stack]` smaps entries), hence the bare `krun:` prefix. On
+   kernels built without `CONFIG_ANON_VMA_NAME=y` every `prctl` fails
+   with EINVAL and the shim is a harmless no-op. The article instead
+   patched QEMU's allocation call sites; the shim gets the same effect
+   without touching libkrun. Note that glibc's own mmaps (arenas,
+   stacks) usually keep their `glibc:` names because glibc renames them
+   after mapping, so the `krun:` labels mostly mark libkrun's direct
+   allocations — the guest RAM region above all.
+
+Which of tiers 2 and 3 are actually available is recorded in `meta.txt`:
+`build/vma-probe` functionally checks `CONFIG_ANON_VMA_NAME` (the config
+files are often absent on custom kernels) by naming a page with
+`prctl(PR_SET_VMA)` and looking at the return value.
+
+When a kernel label is present it is the base for the annotated map:
+passed through verbatim, augmented only where it adds information (thread
+stacks get their comm, the guest-RAM region keeps its identification —
+e.g. `[guest RAM (merged-size match); krun: libkrun.so.2+0x116158]`), and
+categorized by what made the allocation (`krun: libc.so.6+…` counts under
+the caller library's category, `glibc: …` under glibc's).
 
 ### Tracing allocations with strace
 
@@ -326,10 +349,12 @@ device, a library, or the kernel.
 
 ## Limitations
 
-- **No `[anon:...]` labels on this host.** Fedora's kernel is built without
-  `CONFIG_ANON_VMA_NAME`, so `GLIBC_TUNABLES=glibc.mem.decorate_maps=1`
-  (exported for every harness run, harmless and future-proof) cannot label
-  anonymous mappings the way the QEMU article's host does.
+- **`[anon:...]` labels depend on the host kernel.** They need
+  `CONFIG_ANON_VMA_NAME=y`: with it (this host's current kernel), glibc's
+  decorate_maps names and the `label_mmap` shim's `krun:` names appear in
+  smaps; without it (e.g. stock Fedora kernels), neither works and the
+  annotator falls back to pure inference. `meta.txt` records which state
+  the `vma-probe` found, so old and new results are comparable.
 - **Guest RAM is identified by size.** `parse-smaps.awk` sums anonymous rw
   mappings whose size equals the requested RAM ("exact-size match"); without
   a match it takes the largest anonymous mapping ("largest-anon fallback").

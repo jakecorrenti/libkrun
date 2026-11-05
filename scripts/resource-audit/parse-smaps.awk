@@ -106,14 +106,21 @@ END {
     gram_n = 0
     gram_rss = 0
     gram_anon = 0
+    gram_merged = 0
     lg = 0
     lg_size = 0
     for (i = 1; i <= n; i++) {
-        if (ram_kib > 0 && unlabeled_anon(m_path[i]) && m_perms[i] ~ /^rw/ && m_size[i] == ram_kib) {
+        # ram exactly, or ram + the 16 MiB low-memory region when the host
+        # kernel merged the two anonymous RAM mmaps into one VMA
+        if (ram_kib > 0 && unlabeled_anon(m_path[i]) && m_perms[i] ~ /^rw/ \
+            && (m_size[i] == ram_kib || m_size[i] == ram_kib + 16384)) {
             gram_n++
             gram_rss += m_rss[i]
             gram_anon += m_anon[i]
             gram_idx[i] = 1
+            if (m_size[i] == ram_kib + 16384) {
+                gram_merged = 1
+            }
         }
         if (unlabeled_anon(m_path[i]) && m_size[i] > lg_size) {
             lg = i
@@ -121,7 +128,7 @@ END {
         }
     }
     if (gram_n > 0) {
-        method = "exact-size match"
+        method = gram_merged ? "merged-size match" : "exact-size match"
     } else if (lg > 0) {
         method = "largest-anon fallback"
         gram_n = 1
