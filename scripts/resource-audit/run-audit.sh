@@ -296,6 +296,23 @@ write_summary() { # write_summary TEST_DIR NAME VCPUS RAM_MIB TRANSPORT PAYLOAD 
     local io="$test_dir/final-io.txt"
     local parsed="$test_dir/parsed-smaps.tsv"
 
+    # Pre-boot phase (harness --pause-before-run): end-of-phase counters come
+    # from the last samples-preboot.csv row.
+    local have_preboot=0
+    local pb_vmrss=0 pb_rssan=0 pb_rssfile=0 pb_pss=0 pb_uss=0 pb_anon=0
+    local pb_pte=0 pb_threads=0 pb_fds=0 pb_samples=0 pb_span=0
+    if [[ -f "$test_dir/preboot-smaps.txt" ]]; then
+        have_preboot=1
+        local pb_body pb_last
+        pb_body=$(tail -n +2 "$test_dir/samples-preboot.csv" 2>/dev/null || true)
+        if [[ -n "$pb_body" ]]; then
+            pb_last=$(printf '%s\n' "$pb_body" | tail -1)
+            IFS=, read -r _ pb_vmrss pb_rssan pb_rssfile pb_pss pb_uss pb_anon pb_pte pb_threads pb_fds _ _ _ <<< "$pb_last"
+            pb_samples=$(printf '%s\n' "$pb_body" | wc -l)
+            pb_span=$(cut -d, -f1 <<< "$pb_last")
+        fi
+    fi
+
     if [[ -f "$test_dir/final-smaps.txt" ]]; then
         awk -v ram_kib=$((ram_mib * 1024)) -v harness="krun-harness" \
             -f "$SCRIPT_DIR/parse-smaps.awk" "$test_dir/final-smaps.txt" > "$parsed"
@@ -369,6 +386,14 @@ write_summary() { # write_summary TEST_DIR NAME VCPUS RAM_MIB TRANSPORT PAYLOAD 
         echo "Samples: $nsamples over ${span_s:-0}s (interval ${interval}s, duration ${duration}s)"
         echo
 
+        if [[ $have_preboot -eq 1 ]]; then
+            echo "[Phase: VMM built, before guest start]"
+            echo "VmRSS: ${pb_vmrss:-0} KiB  RssAnon: ${pb_rssan:-0} KiB  RssFile: ${pb_rssfile:-0} KiB  PSS: ${pb_pss:-0} KiB  USS: ${pb_uss:-0} KiB"
+            echo "VmPTE: ${pb_pte:-0} KiB  Threads: ${pb_threads:-0}  fds: ${pb_fds:-0}   (at end of pre-boot sampling)"
+            echo "(samples: ${pb_samples:-0} over ${pb_span:-0}s, annotated map: preboot-maps-annotated.txt)"
+            echo
+        fi
+
         echo "[Process counters /proc/PID/status]"
         local key v
         for key in VmPeak VmSize VmHWM VmRSS RssAnon RssFile RssShmem VmPTE VmSwap; do
@@ -402,6 +427,9 @@ write_summary() { # write_summary TEST_DIR NAME VCPUS RAM_MIB TRANSPORT PAYLOAD 
         echo
 
         echo "[Derived]"
+        if [[ $have_preboot -eq 1 && -n "$vmrss" && -n "$anon_r" ]]; then
+            echo "boot cost: VmRSS +$(( vmrss - pb_vmrss )) KiB, Anonymous +$(( anon_r - pb_anon )) KiB (guest RAM + kernel COW)"
+        fi
         echo "guest_ram_rss: $gr_rss KiB (method: $gr_method, $gr_n region(s))"
         echo "vmm_private_anon: $vmm_private_anon KiB   (= Anonymous $t_anon - guest-RAM anon $gr_anon; the headline libkrun overhead)"
         echo "file_backed_rss: ${rss_file:--} KiB (shareable across instances)"
@@ -506,6 +534,14 @@ write_summary() { # write_summary TEST_DIR NAME VCPUS RAM_MIB TRANSPORT PAYLOAD 
                 } >> "$test_dir/summary.txt"
             else
                 echo "(annotate-maps.py failed; run it by hand for the error)" >> "$test_dir/summary.txt"
+            fi
+            if [[ $have_preboot -eq 1 ]]; then
+                # second pass over the pre-boot snapshot; its stdout totals
+                # are already reflected in the phase section above
+                python3 "$SCRIPT_DIR/annotate-maps.py" "$test_dir" \
+                    --name "$name-preboot" --ram-mib "$ram_mib" \
+                    --input-prefix preboot- --output-prefix preboot- >/dev/null 2>&1 \
+                    || echo "(preboot annotate-maps.py failed; run it by hand for the error)" >> "$test_dir/summary.txt"
             fi
         else
             echo "(python3 not found — annotated memory map and charts skipped)" >> "$test_dir/summary.txt"
@@ -623,7 +659,7 @@ run_test() { # run_test NAME — returns nonzero if the test failed
     local log_path=""
     local ready_marker="AUDIT_GUEST_READY"
     local settle=$SETTLE duration=$DURATION interval=$INTERVAL
-    local strace=0 label_mmap=0
+    local strace=0 label_mmap=0 pause_before_run=0
     local -a extra_env=()
 
     mkdir -p "$test_dir"
@@ -636,6 +672,7 @@ run_test() { # run_test NAME — returns nonzero if the test failed
 
     [[ "$vcpus" =~ ^[0-9]+$ ]] || die "test $name: vcpus='$vcpus' is not a number"
     [[ "$ram_mib" =~ ^[0-9]+$ ]] || die "test $name: ram_mib='$ram_mib' is not a number"
+    [[ "$pause_before_run" =~ ^[0-9]+$ ]] || die "test $name: pause_before_run='$pause_before_run' is not a number"
 
     # In nullfs mode the audit workload is mapped in from the host, read-only,
     # unless the test embeds its own binary at the workload path.
@@ -673,6 +710,7 @@ run_test() { # run_test NAME — returns nonzero if the test failed
     fi
     if [[ -n "$net_socket" ]]; then args+=(--net-socket="$net_socket"); fi
     if [[ -n "$log_path" ]]; then args+=(--log="$log_path"); fi
+    if [[ "$pause_before_run" -gt 0 ]]; then args+=(--pause-before-run="$pause_before_run"); fi
     local e
     for e in "${embeds[@]}"; do
         args+=(--embed="$e")
@@ -782,6 +820,60 @@ run_test() { # run_test NAME — returns nonzero if the test failed
 
     local launch_time=$EPOCHREALTIME
     local result="OK" reason="" ready_after=""
+    local ready_from=$launch_time
+    local csv_header="elapsed_s,vmrss_kib,rss_anon_kib,rss_file_kib,pss_kib,uss_kib,anon_kib,pte_kib,threads,fds,cpu_user_s,cpu_sys_s,cpu_guest_s"
+
+    if [[ "$pause_before_run" -gt 0 ]]; then
+        # Phase 1: VMM built (KVM VM, devices, guest RAM, kernel inserted),
+        # guest not executing yet. The harness sleeps pause_before_run seconds
+        # from the marker; keep a 1s safety margin because marker detection
+        # lags and the guest reaches readiness within ~0.2s of the sleep
+        # ending — sampling into the guest phase would corrupt the split.
+        local phase_seen=0
+        while :; do
+            if grep -aFq "AUDIT_PHASE_VMM_BUILT" "$console_log" 2>/dev/null; then
+                phase_seen=1
+                break
+            fi
+            if ! proc_alive "$vm_pid" || ! proc_alive "$pid"; then
+                result="FAILED"
+                reason="harness exited before the VMM-built marker (see guest-console.log)"
+                break
+            fi
+            if time_up "$launch_time" "$settle"; then
+                result="FAILED"
+                reason="VMM-built marker not found within ${settle}s (see guest-console.log)"
+                break
+            fi
+            sleep 0.2
+        done
+        if [[ $phase_seen -eq 1 && "$result" == "OK" ]]; then
+            local preboot_csv="$test_dir/samples-preboot.csv"
+            echo "$csv_header" > "$preboot_csv"
+            local preboot_start=$EPOCHREALTIME
+            local preboot_n=$(( (pause_before_run - 1) / interval ))
+            if (( preboot_n < 1 )); then preboot_n=1; fi
+            local pi
+            for ((pi = 0; pi < preboot_n; pi++)); do
+                if ! sample_once "$vm_pid" "$preboot_csv" "$preboot_start"; then
+                    result="FAILED"
+                    reason="harness exited during pre-boot sampling"
+                    break
+                fi
+                if (( pi < preboot_n - 1 )); then
+                    sleep "$interval"
+                fi
+            done
+            if [[ "$result" == "OK" ]] && proc_alive "$vm_pid"; then
+                cat "/proc/$vm_pid/status" > "$test_dir/preboot-status.txt" 2>/dev/null || true
+                cat "/proc/$vm_pid/smaps" > "$test_dir/preboot-smaps.txt" 2>/dev/null || true
+                cat "/proc/$vm_pid/maps" > "$test_dir/preboot-maps.txt" 2>/dev/null || true
+                cat "/proc/$vm_pid/io" > "$test_dir/preboot-io.txt" 2>/dev/null || true
+            fi
+            # the guest only starts executing when the pause window closes
+            ready_from=$EPOCHREALTIME
+        fi
+    fi
 
     if [[ -n "$ready_marker" ]]; then
         while :; do
@@ -794,7 +886,7 @@ run_test() { # run_test NAME — returns nonzero if the test failed
                 reason="harness exited before the readiness marker (see guest-console.log)"
                 break
             fi
-            if time_up "$launch_time" "$settle"; then
+            if time_up "$ready_from" "$settle"; then
                 result="FAILED"
                 reason="readiness marker not found within ${settle}s (see guest-console.log)"
                 break
@@ -813,7 +905,7 @@ run_test() { # run_test NAME — returns nonzero if the test failed
     fi
 
     local samples="$test_dir/samples.csv"
-    echo "elapsed_s,vmrss_kib,rss_anon_kib,rss_file_kib,pss_kib,uss_kib,anon_kib,pte_kib,threads,fds,cpu_user_s,cpu_sys_s,cpu_guest_s" > "$samples"
+    echo "$csv_header" > "$samples"
 
     if [[ "$result" == "OK" ]]; then
         local sample_start=$EPOCHREALTIME

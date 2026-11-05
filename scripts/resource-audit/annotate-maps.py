@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 """Annotate the memory map of a libkrun resource-audit test snapshot.
 
-Reads final-smaps.txt (the source of truth: its block headers carry the full
-maps line), final-status.txt, task-stats.txt and metrics.txt from TEST_DIR
-and writes into TEST_DIR:
+Reads {input-prefix}smaps.txt (the source of truth: its block headers carry
+the full maps line), {input-prefix}status.txt, task-stats.txt and metrics.txt
+from TEST_DIR and writes into TEST_DIR:
 
-  maps-annotated.txt   every mapping, annotated, sorted by address
-  categories.csv       reservation / RSS / anon rollup per category
-  charts/              reservation and RSS pies, RO/RW reservation bars
+  {output-prefix}maps-annotated.txt   multi-section annotated map (pymap-style):
+                                      full map, segments excluding empty
+                                      reservations, by RSS, by anonymous,
+                                      each with its own totals, plus a
+                                      category charge table
+  {output-prefix}categories.csv       reservation (RO/RW/none) / RSS / anon
+                                      rollup per category
+  charts/                              reservation and RSS pies, RO/RW bars
+
+--input-prefix/--output-prefix select the phase: the default (final-) is the
+end-of-run snapshot; preboot- addresses the VMM-built-before-guest snapshot
+taken for --pause-before-run tests. task-stats.txt and metrics.txt are shared
+between phases unless a prefixed copy exists.
 
 Annotations are inferred from what the kernel exposes: ELF sections for
 file-backed mappings, thread stacks from per-task user stack pointers,
@@ -77,6 +87,10 @@ class Vma:
     @property
     def dirty(self):
         return self.shared_dirty + self.private_dirty
+
+    @property
+    def uss(self):
+        return self.private_clean + self.private_dirty
 
 
 def parse_smaps(path):
@@ -463,29 +477,81 @@ def categorize(v):
 
 # ----- outputs -----
 
-def write_table(vmas, path):
-    ordered = sorted(vmas, key=lambda v: v.start)
+def perm_class(v):
+    if "w" in v.perms:
+        return "rw"
+    if v.perms.startswith("---"):
+        return "none"
+    return "ro"
+
+
+def render_table(vmas, separate_groups=True):
+    """Header + rows for one report section, in the caller's order.
+
+    Address-ordered sections keep the article-style blank line between
+    groups; sorted sections do not, because their groups interleave.
+    """
     displays = [v.label if v.label else (v.path + " " + v.segments).strip()
-                for v in ordered]
+                for v in vmas]
     # A fixed pathname width would let overflowing paths push the trailing
     # counters out of alignment, so the column is sized to its longest entry.
     width = max(len(d) for d in displays + ["pathname/[label]"])
-    header_fmt = "%9s %-33s %-4s %8s %5s %10s %-*s %9s %9s %9s"
-    row_fmt = "%9d %-33s %-4s %8x %5s %10s %-*s %9d %9d %9d"
+    header_fmt = "%9s %-33s %-4s %8s %5s %10s %-*s %9s %9s %9s %9s %9s"
+    row_fmt = "%9d %-33s %-4s %8x %5s %10s %-*s %9d %9d %9d %9d %9d"
     lines = [header_fmt % ("size(KB)", "address_range", "perm", "offset",
                            "dev", "inode", width, "pathname/[label]",
-                           "rss(KB)", "dirty(KB)", "anon(KB)")]
+                           "rss(KB)", "dirty(KB)", "anon(KB)", "pss(KB)",
+                           "uss(KB)")]
     prev_group = None
-    for v, display in zip(ordered, displays):
-        group = (v.label if v.label else v.path).split(" (empty reservation)")[0]
-        if prev_group is not None and group != prev_group:
-            lines.append("")
-        prev_group = group
+    for v, display in zip(vmas, displays):
+        if separate_groups:
+            group = (v.label if v.label else v.path).split(" (empty reservation)")[0]
+            if prev_group is not None and group != prev_group:
+                lines.append("")
+            prev_group = group
         lines.append(row_fmt % (
             v.size, "%x-%x" % (v.start, v.end), v.perms, v.offset, v.dev,
-            v.inode, width, display, v.rss, v.dirty, v.anon))
+            v.inode, width, display, v.rss, v.dirty, v.anon, v.pss, v.uss))
+    return lines
+
+
+def gram_for(vmas, method):
+    ram = [v for v in vmas if v.label.startswith("[guest RAM")]
+    return sum(v.rss for v in ram), method, len(ram)
+
+
+def category_table(rows):
+    lines = ["%-18s %12s %10s %10s %10s %10s %10s" % (
+        "category", "reservation", "RO", "RW", "none", "rss", "anon")]
+    for name, res, rss, anon, ro, rw, none in rows:
+        lines.append("%-18s %12d %10d %10d %10d %10d %10d"
+                     % (name, res, ro, rw, none, rss, anon))
+    return lines
+
+
+def write_report(vmas, path, status, gram_method, cat_rows):
+    out = list(render_table(vmas))
+    out += ["", totals_block(vmas, status, gram_for(vmas, gram_method))]
+
+    resident = [v for v in vmas if v.rss > 0]
+    out += ["", "Segments (excluding empty reservations)"]
+    out += render_table(resident)
+    out += ["", totals_block(resident, {}, gram_for(resident, gram_method))]
+
+    by_rss = sorted(resident, key=lambda v: -v.rss)
+    out += ["", "Segments with RSS usage"]
+    out += render_table(by_rss, separate_groups=False)
+    out += ["", totals_block(by_rss, {}, gram_for(by_rss, gram_method))]
+
+    by_anon = sorted((v for v in vmas if v.anon > 0), key=lambda v: -v.anon)
+    out += ["", "Segments with Anonymous memory"]
+    out += render_table(by_anon, separate_groups=False)
+    out += ["", totals_block(by_anon, {}, gram_for(by_anon, gram_method))]
+
+    out += ["", "Category breakdown"]
+    out += category_table(cat_rows)
     with open(path, "w") as f:
-        f.write("\n".join(lines) + "\n")
+        f.write("\n".join(out) + "\n")
 
 
 def totals_block(vmas, status, gram):
@@ -494,12 +560,14 @@ def totals_block(vmas, status, gram):
     rss = sum(v.rss for v in vmas)
     anon = sum(v.anon for v in vmas)
     dirty = sum(v.dirty for v in vmas)
+    # section footers have no status file; approximate RssFile as rss - anon
+    rss_file = sum(v.rss - v.anon for v in vmas)
     return "\n".join([
         "Total memory (VSZ):     %10d KiB" % total_size,
         "Empty reservations:     %10d KiB" % empty,
         "Total w/o reservations: %10d KiB" % (total_size - empty),
         "RSS:                    %10d KiB" % status.get("VmRSS", rss),
-        "RssFile:                %10d KiB" % status.get("RssFile", 0),
+        "RssFile:                %10d KiB" % status.get("RssFile", rss_file),
         "RssAnon:                %10d KiB" % status.get("RssAnon", anon),
         "Dirty:                  %10d KiB" % dirty,
         "Anonymous:              %10d KiB" % anon,
@@ -510,18 +578,23 @@ def totals_block(vmas, status, gram):
 def write_categories(vmas, path):
     cats = {}
     for v in vmas:
-        c = cats.setdefault(categorize(v), [0, 0, 0])
+        c = cats.setdefault(categorize(v), [0, 0, 0, 0, 0, 0])
         c[0] += v.size
         c[1] += v.rss
         c[2] += v.anon
+        c[{"ro": 3, "rw": 4, "none": 5}[perm_class(v)]] += v.size
     total_res = sum(c[0] for c in cats.values()) or 1
     total_rss = sum(c[1] for c in cats.values()) or 1
-    rows = sorted(cats.items(), key=lambda kv: -kv[1][0])
+    # rows: (name, reservation, rss, anon, ro_res, rw_res, none_res)
+    rows = [(n, v[0], v[1], v[2], v[3], v[4], v[5])
+            for n, v in sorted(cats.items(), key=lambda kv: -kv[1][0])]
     with open(path, "w") as f:
-        f.write("category,reservation_kib,rss_kib,anon_kib,pct_of_reservation,pct_of_rss\n")
-        for name, (res, rss, anon) in rows:
-            f.write("%s,%d,%d,%d,%.1f,%.1f\n" % (
-                name, res, rss, anon, res * 100.0 / total_res, rss * 100.0 / total_rss))
+        f.write("category,reservation_kib,ro_res_kib,rw_res_kib,none_res_kib,"
+                "rss_kib,anon_kib,pct_of_reservation,pct_of_rss\n")
+        for name, res, rss, anon, ro, rw, none in rows:
+            f.write("%s,%d,%d,%d,%d,%d,%d,%.1f,%.1f\n" % (
+                name, res, ro, rw, none, rss, anon,
+                res * 100.0 / total_res, rss * 100.0 / total_rss))
     return rows
 
 
@@ -632,30 +705,39 @@ def main():
     ap.add_argument("--ram-mib", type=int, default=None,
                     help="guest RAM in MiB (default: ram_mib from metrics.txt)")
     ap.add_argument("--no-charts", action="store_true", help="skip chart generation")
+    ap.add_argument("--input-prefix", default="final-",
+                    help="snapshot file prefix to read (final-, preboot-)")
+    ap.add_argument("--output-prefix", default="",
+                    help="prefix for generated files (e.g. preboot-)")
     args = ap.parse_args()
 
     d = args.test_dir
-    smaps = os.path.join(d, "final-smaps.txt")
+    inp = args.input_prefix
+    smaps = os.path.join(d, inp + "smaps.txt")
     if not os.path.exists(smaps):
-        smaps = os.path.join(d, "final-maps.txt")
+        smaps = os.path.join(d, inp + "maps.txt")
         if not os.path.exists(smaps):
-            print("annotate-maps.py: no final-smaps.txt/final-maps.txt in %s" % d,
-                  file=sys.stderr)
+            print("annotate-maps.py: no %ssmaps.txt/%smaps.txt in %s"
+                  % (inp, inp, d), file=sys.stderr)
             return 1
     vmas = parse_smaps(smaps)
     if not vmas:
         print("annotate-maps.py: %s parsed to zero mappings" % smaps, file=sys.stderr)
         return 1
 
+    def prefixed_or_shared(name):
+        p = os.path.join(d, inp + name)
+        return p if os.path.exists(p) else os.path.join(d, name)
+
     ram_mib = args.ram_mib
     if ram_mib is None:
-        ram_mib = int(parse_metrics(os.path.join(d, "metrics.txt")).get("ram_mib", 0))
+        ram_mib = int(parse_metrics(prefixed_or_shared("metrics.txt")).get("ram_mib", 0))
     if ram_mib <= 0:
         print("annotate-maps.py: guest RAM size unknown (--ram-mib)", file=sys.stderr)
         return 1
 
-    tasks = parse_task_stats(os.path.join(d, "task-stats.txt"))
-    status = parse_status(os.path.join(d, "final-status.txt"))
+    tasks = parse_task_stats(prefixed_or_shared("task-stats.txt"))
+    status = parse_status(os.path.join(d, inp + "status.txt"))
 
     gram = mark_guest_ram(vmas, ram_mib * KiB)
     enrich_glibc_stacks(vmas, tasks)
@@ -672,28 +754,20 @@ def main():
             if v.size > 0 and v.rss == 0:
                 v.label += " (empty reservation)"
 
-    write_table(vmas, os.path.join(d, "maps-annotated.txt"))
-    rows = write_categories(vmas, os.path.join(d, "categories.csv"))
+    out = args.output_prefix
+    rows = write_categories(vmas, os.path.join(d, out + "categories.csv"))
+    write_report(vmas, os.path.join(d, out + "maps-annotated.txt"),
+                 status, gram[1], rows)
     if not args.no_charts:
         charts = os.path.join(d, "charts")
         os.makedirs(charts, exist_ok=True)
-        res_rows = [(name, vals[0]) for name, vals in rows]
-        rss_rows = [(name, vals[1]) for name, vals in rows if vals[1] > 0]
+        res_rows = [(r[0], r[1]) for r in rows]
+        rss_rows = [(r[0], r[2]) for r in rows if r[2] > 0]
+        perm_rows = [(r[0], r[4], r[5], r[6]) for r in rows]
         write_pie(os.path.join(charts, "%s-reservations-pie.svg" % args.name),
                   "%s — reservations by category" % args.name, "reservation", res_rows)
         write_pie(os.path.join(charts, "%s-rss-pie.svg" % args.name),
                   "%s — RSS by category" % args.name, "resident", rss_rows)
-        perms = {}
-        for v in vmas:
-            c = perms.setdefault(categorize(v), [0, 0, 0])
-            if "w" in v.perms:
-                c[1] += v.size
-            elif v.perms.startswith("---"):
-                c[2] += v.size
-            else:
-                c[0] += v.size
-        perm_rows = sorted(((n, r, w, o) for n, (r, w, o) in perms.items()),
-                           key=lambda t: -(t[1] + t[2] + t[3]))
         write_ro_rw(os.path.join(charts, "%s-reservations-ro-rw.svg" % args.name),
                     "%s — reservations by permission" % args.name, perm_rows)
 

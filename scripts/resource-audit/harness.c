@@ -99,6 +99,7 @@ struct cmdline {
     uint32_t blk_format;
     const char *net_socket;
     const char *log_path;
+    unsigned int pause_before_run;
     struct devices devices;
     char *const *workload_args;
 };
@@ -141,6 +142,9 @@ static void print_help(char *const name)
         "      --blk-format=RAW|QCOW2|VMDK BLK: disk format (default RAW)\n"
         "      --net-socket=PATH           NET: passt unix stream socket path\n"
         "      --log=PATH                  write the libkrun log to PATH\n"
+        "      --pause-before-run=SECS     after the VM is built, print\n"
+        "                                  AUDIT_PHASE_VMM_BUILT to stderr and\n"
+        "                                  sleep SECS before running the guest\n"
         "\n"
         "FIRMWARE payloads boot the firmware itself: no init configuration,\n"
         "root filesystem or workload is set up.\n",
@@ -212,6 +216,7 @@ enum {
     OPT_BLK_FORMAT,
     OPT_NET_SOCKET,
     OPT_LOG,
+    OPT_PAUSE_BEFORE_RUN,
 };
 
 static const struct option long_options[] = {
@@ -235,6 +240,7 @@ static const struct option long_options[] = {
     { "blk-format", required_argument, NULL, OPT_BLK_FORMAT },
     { "net-socket", required_argument, NULL, OPT_NET_SOCKET },
     { "log", required_argument, NULL, OPT_LOG },
+    { "pause-before-run", required_argument, NULL, OPT_PAUSE_BEFORE_RUN },
     { NULL, 0, NULL, 0 }
 };
 
@@ -460,6 +466,7 @@ bool parse_cmdline(int argc, char *const argv[], struct cmdline *cmdline)
         .blk_format = KRUN_DISK_FORMAT_RAW,
         .net_socket = NULL,
         .log_path = NULL,
+        .pause_before_run = 0,
         .devices = { 0 },
         .workload_args = NULL,
     };
@@ -553,6 +560,13 @@ bool parse_cmdline(int argc, char *const argv[], struct cmdline *cmdline)
             break;
         case OPT_LOG:
             cmdline->log_path = optarg;
+            break;
+        case OPT_PAUSE_BEFORE_RUN:
+            if (!parse_num(optarg, 65535, &num)) {
+                fprintf(stderr, "Invalid --pause-before-run value '%s'\n", optarg);
+                return false;
+            }
+            cmdline->pause_before_run = (unsigned int)num;
             break;
         case '?':
             return false;
@@ -786,6 +800,15 @@ int main(int argc, char *const argv[])
 #endif
 
     CHECK(KrunVmm vmm = krun_vmm_builder_build(&builder, &krun_err));
+
+    if (cmdline.pause_before_run > 0) {
+        // Phase marker for the audit driver: everything above is built (KVM
+        // VM, devices, guest RAM, kernel inserted), the guest has not
+        // executed yet.
+        fprintf(stderr, "AUDIT_PHASE_VMM_BUILT\n");
+        fflush(stderr);
+        sleep(cmdline.pause_before_run);
+    }
     krun_vmm_run(vmm); // never returns
 
     // Not reached.
