@@ -41,6 +41,38 @@ Expect a few minutes. The `minimal-strace` row in `summary.md` is
 attribution-only — ptrace perturbs timing, so don't diff it against the
 untraced rows.
 
+### Realistic guests
+
+`tests-realistic.conf` runs the chroot_vm / crun-krun workload model: a real
+distro rootfs (`examples/rootfs_fedora`, regenerate with
+`make -C examples rootfs`) served over virtio-fs, a real `/bin/sh` workload
+that prints the readiness marker itself, chroot_vm's device and resource
+shape (4 vCPUs / 4 GiB with rng, balloon and vsock), a lean 1-vCPU variant,
+and a block-I/O variant where the guest mounts and writes to an ext4 image
+before going idle:
+
+```sh
+./run-audit.sh --config tests-realistic.conf
+```
+
+Two artifacts of the realistic setup are worth knowing:
+
+- **Split guest RAM.** x86_64 guests larger than the 32-bit PCI gap
+  (3328 MiB — the 4 GiB chroot_vm shape, for example) get their RAM split
+  into several host mmaps (below-gap + above-4G), none of which matches the
+  requested RAM size. Both parsers handle this with a "multi-region"
+  method: every anonymous rw mapping of at least 16 MiB that is not a
+  glibc decoration or a shim-labeled malloc is counted as guest RAM.
+  Smaller guests keep using the exact/merged-size matches.
+- **The podman-exported rootfs carries foreign uids with setuid bits.**
+  Executing its `/sbin/mount` (setuid, owned by that foreign uid) flips
+  euid away from root even when invoked by root, and libmount's `fsopen()`
+  fails with EPERM. The blk test therefore mounts through
+  `build/blk-setup`, a static helper doing raw `mount(2)`/`write(2)`, which
+  works as euid 0. Fixing the rootfs itself needs host root
+  (`sudo chown -R 0:0 examples/rootfs_fedora`); a properly owned or
+  non-podman rootfs would let `/sbin/mount` work again.
+
 Requirements: bash ≥ 5, gcc/cc, awk, python3 (for the annotated memory map
 and charts; without it the run still works and says so) and a usable
 `/dev/kvm`. `strace` is optional (needed only for `strace=1` tests). libkrun
@@ -421,16 +453,16 @@ device, a library, or the kernel.
   smaps; without it (e.g. stock Fedora kernels), neither works and the
   annotator falls back to pure inference. `meta.txt` records which state
   the `vma-probe` found, so old and new results are comparable.
-- **Guest RAM is identified by size.** `parse-smaps.awk` sums anonymous rw
-  mappings whose size equals the requested RAM ("exact-size match"); without
-  a match it takes the largest anonymous mapping ("largest-anon fallback").
-  With the krunfw payload the low-memory region below the kernel load
-  address and the main RAM region usually *merge* into one VMA of
-  RAM + 16 MiB, so in practice the fallback is the norm there;
-  `annotate-maps.py` additionally recognizes that merged size explicitly
-  ("merged-size match"). The small low-memory
-  region is included either way; residual ambiguity is well under 1 MiB. The
-  method used is printed in every summary and annotated map.
+- **Guest RAM is identified by size.** `parse-smaps.awk` and
+  `annotate-maps.py` first try anonymous rw mappings whose size equals the
+  requested RAM ("exact-size match"), then RAM + 16 MiB for the merged
+  low-region VMA ("merged-size match"). Guests larger than the 32-bit PCI
+  gap (3328 MiB) have their RAM split into several mmaps of no recognizable
+  size; for those, every anonymous rw mapping of at least 16 MiB that is
+  not a glibc decoration or a shim-labeled malloc is claimed
+  ("multi-region"). The last resort is the largest anonymous mapping
+  ("largest-anon fallback"). The method used is printed in every summary
+  and annotated map.
 - **`vmm_private_anon` overstates pure VMM overhead for krunfw payloads** by
   the guest kernel's dirty `.data` inside `libkrunfw.so` (~16 MiB) — that
   memory belongs to the guest, not the VMM. The category rollup separates

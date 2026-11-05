@@ -23,6 +23,7 @@ INCLUDEDIR="$PREFIX/include"
 
 HARNESS="$SCRIPT_DIR/build/krun-harness"
 PAUSE="$SCRIPT_DIR/build/pause"
+BLK_SETUP="$SCRIPT_DIR/build/blk-setup"
 LABEL_SHIM="$SCRIPT_DIR/build/mmap-label.so"
 VMA_PROBE="$SCRIPT_DIR/build/vma-probe"
 CLK_TCK=$(getconf CLK_TCK)
@@ -41,6 +42,7 @@ SELECTED=()
 DEFAULT_APPEND_CMDLINE=""
 PAUSE_BUILD_CMD=""
 HARNESS_BUILD_CMD=""
+BLK_SETUP_BUILD_CMD=""
 LABEL_SHIM_BUILD_CMD=""
 VMA_PROBE_BUILD_CMD=""
 STRACE_K_OK=0
@@ -150,6 +152,13 @@ build_binaries() {
         "$CC" -O2 -I"$INCLUDEDIR" "$SCRIPT_DIR/harness.c" -o "$HARNESS" \
             -L"$LIBDIR" -lkrun -lkrun_init -Wl,-rpath,"$LIBDIR"
         HARNESS_BUILD_CMD="$CC -O2 -I$INCLUDEDIR harness.c -o build/krun-harness -L$LIBDIR -lkrun -lkrun_init -Wl,-rpath,$LIBDIR"
+    fi
+
+    if [[ ! -f "$BLK_SETUP" || "$SCRIPT_DIR/blk-setup.c" -nt "$BLK_SETUP" || $REBUILD -eq 1 ]]; then
+        # Static, like pause: the realistic-matrix rootfs it runs in is the
+        # only thing the guest needs.
+        "$CC" -O2 -static -o "$BLK_SETUP" "$SCRIPT_DIR/blk-setup.c"
+        BLK_SETUP_BUILD_CMD="$CC -O2 -static blk-setup.c -o build/blk-setup"
     fi
 
     if [[ ! -f "$LABEL_SHIM" || "$SCRIPT_DIR/mmap-label.c" -nt "$LABEL_SHIM" || $REBUILD -eq 1 ]]; then
@@ -626,6 +635,7 @@ write_meta() {
         echo "  first, then $LIBDIR — an alternative libkrunfw.so.5 build placed earlier wins."
         echo "harness build: ${HARNESS_BUILD_CMD:-cached from previous run}"
         echo "pause build: ${PAUSE_BUILD_CMD:-cached from previous run}"
+        echo "blk-setup build: ${BLK_SETUP_BUILD_CMD:-cached from previous run}"
         echo "mmap-label shim: ${LABEL_SHIM_BUILD_CMD:-cached from previous run}"
         if command -v strace >/dev/null 2>&1; then
             echo "strace: $(command -v strace) (callstacks: $([[ $STRACE_K_OK -eq 1 ]] && echo yes || echo no))"
