@@ -11,7 +11,11 @@
 # Guest-RAM identification: libkrun mmaps guest RAM as anonymous rw regions.
 # With typical sizes the main region matches the requested RAM exactly, so
 # anonymous rw mappings of exactly ram_kib are summed ("exact-size match");
-# without a match the single largest anonymous mapping is used instead
+# ram + 16 MiB covers the merged low-region VMA ("merged-size match"). Guests
+# larger than the 32-bit PCI gap (3328 MiB) get their RAM split into several
+# mmaps of no recognizable size, so every anonymous rw mapping of at least
+# 16 MiB that is not a glibc decoration or a shim-labeled malloc is claimed
+# ("multi-region"). The last resort is the single largest anonymous mapping
 # ("largest-anon fallback"). The small low-memory region below the kernel
 # load address is not separable from other anonymous mappings and is counted
 # under "other-anon" (its RSS is typically far below 1 MiB).
@@ -129,14 +133,32 @@ END {
     }
     if (gram_n > 0) {
         method = gram_merged ? "merged-size match" : "exact-size match"
-    } else if (lg > 0) {
-        method = "largest-anon fallback"
-        gram_n = 1
-        gram_rss = m_rss[lg]
-        gram_anon = m_anon[lg]
-        gram_idx[lg] = 1
     } else {
-        method = "none"
+        # Guests larger than the 32-bit PCI gap (3328 MiB) get their RAM
+        # split into several mmaps, none matching the RAM size exactly:
+        # claim every sizeable anonymous rw region that is not a glibc
+        # decoration or a shim-labeled malloc (arena reservations are ---p
+        # and excluded by the rw filter).
+        for (i = 1; i <= n; i++) {
+            if (unlabeled_anon(m_path[i]) && m_perms[i] ~ /^rw/ && m_size[i] >= 16384 \
+                && m_path[i] !~ /glibc:/ && m_path[i] !~ /malloc/) {
+                gram_n++
+                gram_rss += m_rss[i]
+                gram_anon += m_anon[i]
+                gram_idx[i] = 1
+            }
+        }
+        if (gram_n > 0) {
+            method = "multi-region"
+        } else if (lg > 0) {
+            method = "largest-anon fallback"
+            gram_n = 1
+            gram_rss = m_rss[lg]
+            gram_anon = m_anon[lg]
+            gram_idx[lg] = 1
+        } else {
+            method = "none"
+        }
     }
 
     for (i = 1; i <= n; i++) {

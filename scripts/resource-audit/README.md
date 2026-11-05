@@ -407,16 +407,16 @@ device, a library, or the kernel.
   smaps; without it (e.g. stock Fedora kernels), neither works and the
   annotator falls back to pure inference. `meta.txt` records which state
   the `vma-probe` found, so old and new results are comparable.
-- **Guest RAM is identified by size.** `parse-smaps.awk` sums anonymous rw
-  mappings whose size equals the requested RAM ("exact-size match"); without
-  a match it takes the largest anonymous mapping ("largest-anon fallback").
-  With the krunfw payload the low-memory region below the kernel load
-  address and the main RAM region usually *merge* into one VMA of
-  RAM + 16 MiB, so in practice the fallback is the norm there;
-  `annotate-maps.py` additionally recognizes that merged size explicitly
-  ("merged-size match"). The small low-memory
-  region is included either way; residual ambiguity is well under 1 MiB. The
-  method used is printed in every summary and annotated map.
+- **Guest RAM is identified by size.** `parse-smaps.awk` and
+  `annotate-maps.py` first try anonymous rw mappings whose size equals the
+  requested RAM ("exact-size match"), then RAM + 16 MiB for the merged
+  low-region VMA ("merged-size match"). Guests larger than the 32-bit PCI
+  gap (3328 MiB) have their RAM split into several mmaps of no recognizable
+  size; for those, every anonymous rw mapping of at least 16 MiB that is
+  not a glibc decoration or a shim-labeled malloc is claimed
+  ("multi-region"). The last resort is the largest anonymous mapping
+  ("largest-anon fallback"). The method used is printed in every summary
+  and annotated map.
 - **`vmm_private_anon` overstates pure VMM overhead for krunfw payloads** by
   the guest kernel's dirty `.data` inside `libkrunfw.so` (~16 MiB) — that
   memory belongs to the guest, not the VMM. The category rollup separates

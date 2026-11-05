@@ -263,6 +263,13 @@ def is_thread_stack(v):
             or (kernel_name(v) or "").startswith("glibc: pthread stack"))
 
 
+def _is_allocator_label(v):
+    """True for mappings the shim or glibc claimed as allocations — the
+    multi-region guest-RAM rule must not count those as guest RAM."""
+    kn = kernel_name(v)
+    return kn is not None and (kn.startswith("glibc:") or "malloc" in kn)
+
+
 def mark_guest_ram(vmas, ram_kib):
     anon_rw = [v for v in vmas if is_anon(v) and v.perms.startswith("rw")]
     targets = []
@@ -273,11 +280,22 @@ def mark_guest_ram(vmas, ram_kib):
         if targets:
             method = m
             break
+    if not targets:
+        # Guests larger than the 32-bit PCI gap (3328 MiB) get their RAM
+        # split into several mmaps (below-gap + above-4G), none of which
+        # matches the RAM size exactly: claim every sizeable anonymous rw
+        # region that is not a glibc decoration or a shim-labeled malloc.
+        # (Arena reservations are ---p and excluded by the rw filter.)
+        targets = [v for v in anon_rw if v.size >= GUEST_RAM_LOW_KIB
+                   and not _is_allocator_label(v)]
+        if targets:
+            method = "multi-region"
     if not targets and anon_rw:
         targets = [max(anon_rw, key=lambda v: v.size)]
     # The low-memory region below the kernel load address is guest RAM too;
     # with per-mapping kernel labels the two RAM mmaps no longer merge.
-    if ram_kib != GUEST_RAM_LOW_KIB:
+    # No-op for the multi-region method, which already claimed it.
+    if method != "multi-region" and ram_kib != GUEST_RAM_LOW_KIB:
         targets += [v for v in anon_rw
                     if v.size == GUEST_RAM_LOW_KIB and v not in targets]
     for v in targets:
