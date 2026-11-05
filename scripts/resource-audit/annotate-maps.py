@@ -511,15 +511,16 @@ def render_table(vmas, separate_groups=True):
     """
     displays = [v.label if v.label else (v.path + " " + v.segments).strip()
                 for v in vmas]
-    # A fixed pathname width would let overflowing paths push the trailing
-    # counters out of alignment, so the column is sized to its longest entry.
-    width = max(len(d) for d in displays + ["pathname/[label]"])
-    header_fmt = "%9s %-33s %-4s %8s %5s %10s %-*s %9s %9s %9s %9s %9s"
-    row_fmt = "%9d %-33s %-4s %8x %5s %10s %-*s %9d %9d %9d %9d %9d"
+    # The label trails unpadded: sizing its column to the longest entry made
+    # every row as wide as the widest label (300+ chars), so terminals
+    # wrapped each row and buried the fixed columns. The counters sit at
+    # fixed columns instead, and addresses/offsets are zero-padded so low
+    # mappings line up with high ones, as in the article's pymap output.
+    header_fmt = "%9s %-33s %-4s %8s %5s %10s %9s %9s %9s %9s %9s %s"
+    row_fmt = "%9d %016x-%016x %-4s %08x %5s %10s %9d %9d %9d %9d %9d %s"
     lines = [header_fmt % ("size(KB)", "address_range", "perm", "offset",
-                           "dev", "inode", width, "pathname/[label]",
-                           "rss(KB)", "dirty(KB)", "anon(KB)", "pss(KB)",
-                           "uss(KB)")]
+                           "dev", "inode", "rss(KB)", "dirty(KB)", "anon(KB)",
+                           "pss(KB)", "uss(KB)", "pathname/[label]")]
     prev_group = None
     for v, display in zip(vmas, displays):
         if separate_groups:
@@ -528,8 +529,8 @@ def render_table(vmas, separate_groups=True):
                 lines.append("")
             prev_group = group
         lines.append(row_fmt % (
-            v.size, "%x-%x" % (v.start, v.end), v.perms, v.offset, v.dev,
-            v.inode, width, display, v.rss, v.dirty, v.anon, v.pss, v.uss))
+            v.size, v.start, v.end, v.perms, v.offset, v.dev,
+            v.inode, v.rss, v.dirty, v.anon, v.pss, v.uss, display))
     return lines
 
 
