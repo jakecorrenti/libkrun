@@ -24,6 +24,7 @@ INCLUDEDIR="$PREFIX/include"
 HARNESS="$SCRIPT_DIR/build/krun-harness"
 PAUSE="$SCRIPT_DIR/build/pause"
 LABEL_SHIM="$SCRIPT_DIR/build/mmap-label.so"
+VMA_PROBE="$SCRIPT_DIR/build/vma-probe"
 CLK_TCK=$(getconf CLK_TCK)
 
 CONFIG_FILE="$SCRIPT_DIR/tests.conf"
@@ -41,6 +42,7 @@ DEFAULT_APPEND_CMDLINE=""
 PAUSE_BUILD_CMD=""
 HARNESS_BUILD_CMD=""
 LABEL_SHIM_BUILD_CMD=""
+VMA_PROBE_BUILD_CMD=""
 STRACE_K_OK=0
 STRACE_KILL_OK=0
 CURRENT_PID=""
@@ -153,6 +155,11 @@ build_binaries() {
     if [[ ! -f "$LABEL_SHIM" || "$SCRIPT_DIR/mmap-label.c" -nt "$LABEL_SHIM" || $REBUILD -eq 1 ]]; then
         "$CC" -O2 -shared -fPIC -o "$LABEL_SHIM" "$SCRIPT_DIR/mmap-label.c" -ldl
         LABEL_SHIM_BUILD_CMD="$CC -O2 -shared -fPIC -o build/mmap-label.so mmap-label.c -ldl"
+    fi
+
+    if [[ ! -f "$VMA_PROBE" || "$SCRIPT_DIR/vma-probe.c" -nt "$VMA_PROBE" || $REBUILD -eq 1 ]]; then
+        "$CC" -O2 -o "$VMA_PROBE" "$SCRIPT_DIR/vma-probe.c"
+        VMA_PROBE_BUILD_CMD="$CC -O2 -o build/vma-probe vma-probe.c"
     fi
 
     # Not every strace build knows -k (syscall callstacks) or
@@ -544,19 +551,30 @@ write_run_summary() {
 }
 
 write_meta() {
-    local anon_labels="unknown"
-    local kconfig="/boot/config-$(uname -r)"
-    if [[ -r "$kconfig" ]]; then
-        if grep -q '^CONFIG_ANON_VMA_NAME=y' "$kconfig"; then
+    # Functional probe first: neither /boot/config-$(uname -r) nor
+    # /proc/config.gz is guaranteed to exist (custom kernels).
+    local anon_labels="unknown" anon_source="config file"
+    if [[ -x "$VMA_PROBE" ]]; then
+        anon_source="functional probe"
+        if "$VMA_PROBE" >/dev/null 2>&1; then
             anon_labels="yes"
         else
             anon_labels="no"
         fi
-    elif [[ -r /proc/config.gz ]]; then
-        if gzip -cd /proc/config.gz 2>/dev/null | grep '^CONFIG_ANON_VMA_NAME=y' >/dev/null; then
-            anon_labels="yes"
-        else
-            anon_labels="no"
+    else
+        local kconfig="/boot/config-$(uname -r)"
+        if [[ -r "$kconfig" ]]; then
+            if grep -q '^CONFIG_ANON_VMA_NAME=y' "$kconfig"; then
+                anon_labels="yes"
+            else
+                anon_labels="no"
+            fi
+        elif [[ -r /proc/config.gz ]]; then
+            if gzip -cd /proc/config.gz 2>/dev/null | grep '^CONFIG_ANON_VMA_NAME=y' >/dev/null; then
+                anon_labels="yes"
+            else
+                anon_labels="no"
+            fi
         fi
     fi
 
@@ -579,9 +597,11 @@ write_meta() {
             echo "strace: not installed"
         fi
         echo "settle=${SETTLE}s duration=${DURATION}s interval=${INTERVAL}s"
-        echo "CONFIG_ANON_VMA_NAME: $anon_labels — when unset, anonymous mappings carry no"
-        echo "  [anon:...] labels in smaps even with GLIBC_TUNABLES=glibc.mem.decorate_maps=1;"
-        echo "  guest RAM is then identified by size (see parse-smaps.awk)."
+        echo "CONFIG_ANON_VMA_NAME: $anon_labels ($anon_source) — glibc's"
+        echo "  GLIBC_TUNABLES=glibc.mem.decorate_maps=1 labels and the label_mmap shim both"
+        echo "  depend on it; without it anonymous mappings carry no [anon:...] labels in smaps"
+        echo "  and guest RAM is identified by size only (see parse-smaps.awk)."
+        echo "vma probe build: ${VMA_PROBE_BUILD_CMD:-cached from previous run}"
     } > "$RESULTS_DIR/meta.txt"
 }
 
@@ -688,6 +708,9 @@ run_test() { # run_test NAME — returns nonzero if the test failed
         echo "# environment"
         echo "LD_LIBRARY_PATH=$ld_path"
         echo "GLIBC_TUNABLES=glibc.mem.decorate_maps=1"
+        if [[ $label_mmap -eq 1 ]]; then
+            echo "LD_PRELOAD=$LABEL_SHIM"
+        fi
         for kv in "${extra_env[@]}"; do echo "$kv"; done
         echo "# knobs"
         echo "strace=$strace"
