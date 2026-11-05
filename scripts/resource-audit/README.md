@@ -27,6 +27,20 @@ tears the VM down and writes a report. Results land in
 `results/<YYYYMMDD-HHMMSS>/<test>/`; the run-level comparison table is
 `results/<runid>/summary.md`.
 
+### Everything in one command
+
+`tests-full.conf` is the maximal matrix: every axis above plus PCI/ACPI and
+the external kernel (when a libkrunfw vmlinux is present), every test
+phased and labeled, and a strace attribution run:
+
+```sh
+./run-audit.sh --config tests-full.conf
+```
+
+Expect a few minutes. The `minimal-strace` row in `summary.md` is
+attribution-only — ptrace perturbs timing, so don't diff it against the
+untraced rows.
+
 Requirements: bash ≥ 5, gcc/cc, awk, python3 (for the annotated memory map
 and charts; without it the run still works and says so) and a usable
 `/dev/kvm`. `strace` is optional (needed only for `strace=1` tests). libkrun
