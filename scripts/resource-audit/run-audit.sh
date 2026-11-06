@@ -356,20 +356,25 @@ write_summary() { # write_summary TEST_DIR NAME CONFIG_LABEL RAM_MIB RESULT_LINE
         : > "$parsed"
     fi
 
-    local gr_method="none" gr_n=0 gr_rss=0 gr_anon=0
+    local gr_method="none" gr_n=0 gr_rss=0 gr_anon=0 kcow_anon=0
     local t_rss=0 t_anon=0 t_pss=0 t_uss=0 t_shared=0
     if [[ -s "$parsed" ]]; then
-        local gr_line tl_line
+        local gr_line tl_line kc_line
         gr_line=$(grep $'^GUESTRAM\t' "$parsed" || true)
         tl_line=$(grep $'^TOTAL\t' "$parsed" || true)
+        kc_line=$(grep $'^KERNELCOW\t' "$parsed" || true)
         if [[ -n "$gr_line" ]]; then
             IFS=$'\t' read -r _ gr_method gr_n gr_rss gr_anon <<< "$gr_line"
         fi
         if [[ -n "$tl_line" ]]; then
             IFS=$'\t' read -r _ t_rss t_anon t_pss t_uss t_shared <<< "$tl_line"
         fi
+        if [[ -n "$kc_line" ]]; then
+            IFS=$'\t' read -r _ kcow_anon <<< "$kc_line"
+        fi
     fi
     local vmm_private_anon=$(( t_anon - gr_anon ))
+    local framework_private_anon=$(( vmm_private_anon - kcow_anon ))
 
     local vmrss rss_anon rss_file vmpte threads
     vmrss=$(proc_field "$status" "VmRSS:")
@@ -462,7 +467,9 @@ write_summary() { # write_summary TEST_DIR NAME CONFIG_LABEL RAM_MIB RESULT_LINE
             echo "boot cost: VmRSS $(signed_kib $(( vmrss - pb_vmrss ))) KiB, Anonymous $(signed_kib $(( anon_r - pb_anon ))) KiB (guest RAM + kernel COW)"
         fi
         echo "guest_ram_rss: $gr_rss KiB (method: $gr_method, $gr_n region(s))"
-        echo "vmm_private_anon: $vmm_private_anon KiB   (= Anonymous $t_anon - guest-RAM anon $gr_anon; the headline libkrun overhead)"
+        echo "vmm_private_anon: $vmm_private_anon KiB   (= Anonymous $t_anon - guest-RAM anon $gr_anon)"
+        echo "kernel_image_cow: $kcow_anon KiB   (guest-kernel boot writes inside the libkrunfw mapping)"
+        echo "framework_private_anon: $framework_private_anon KiB   (= vmm_private_anon - kernel_image_cow; the VMM library's own per-instance cost)"
         echo "file_backed_rss: ${rss_file:--} KiB (shareable across instances)"
         echo
 
@@ -534,6 +541,8 @@ write_summary() { # write_summary TEST_DIR NAME CONFIG_LABEL RAM_MIB RESULT_LINE
         echo "pss_kib=${pss:--}"
         echo "guest_ram_rss_kib=$gr_rss"
         echo "vmm_private_anon_kib=$vmm_private_anon"
+        echo "kernel_image_cow_kib=$kcow_anon"
+        echo "framework_private_anon_kib=$framework_private_anon"
         echo "vmpte_kib=${vmpte:--}"
         echo "threads=${threads:--}"
         if [[ -s "$test_dir/fds.txt" ]]; then
@@ -586,14 +595,14 @@ write_run_summary() {
         echo "Memory values in KiB, CPU in seconds. Per-test details in <test>/summary.txt,"
         echo "run metadata in meta.txt, raw samples in <test>/samples.csv."
         echo
-        echo "| test | ram | RSS | RssAnon | USS | PSS | guest_ram_rss | vmm_private_anon | VmPTE | threads | fds | cpu_user_s | cpu_sys_s | cpu_guest_s | result |"
-        echo "|------|-----|-----|---------|-----|-----|---------------|------------------|-------|---------|-----|------------|------------|--------------|--------|"
+        echo "| test | ram | RSS | RssAnon | USS | PSS | guest_ram_rss | vmm_private_anon | framework_private_anon | VmPTE | threads | fds | cpu_user_s | cpu_sys_s | cpu_guest_s | result |"
+        echo "|------|-----|-----|---------|-----|-----|---------------|------------------|-----------------------|-------|---------|-----|------------|------------|--------------|--------|"
         local name m
         for name in "${COMPLETED[@]}"; do
             m="$RESULTS_DIR/$name/metrics.txt"
             if [[ -f "$m" ]]; then
                 awk -F= -v t="$name" '
-                    /^(ram_mib|vmrss_kib|rss_anon_kib|uss_kib|pss_kib|guest_ram_rss_kib|vmm_private_anon_kib|vmpte_kib|threads|fds|cpu_user_s|cpu_sys_s|cpu_guest_s|result)=/ {
+                    /^(ram_mib|vmrss_kib|rss_anon_kib|uss_kib|pss_kib|guest_ram_rss_kib|vmm_private_anon_kib|framework_private_anon_kib|vmpte_kib|threads|fds|cpu_user_s|cpu_sys_s|cpu_guest_s|result)=/ {
                         v[$1] = $2
                     }
                     function val(k) {
@@ -601,14 +610,15 @@ write_run_summary() {
                         return "-"
                     }
                     END {
-                        printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
+                        printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
                             t, val("ram_mib"), \
                             val("vmrss_kib"), val("rss_anon_kib"), val("uss_kib"), val("pss_kib"), val("guest_ram_rss_kib"), \
-                            val("vmm_private_anon_kib"), val("vmpte_kib"), val("threads"), val("fds"), \
+                            val("vmm_private_anon_kib"), val("framework_private_anon_kib"), val("vmpte_kib"), \
+                            val("threads"), val("fds"), \
                             val("cpu_user_s"), val("cpu_sys_s"), val("cpu_guest_s"), val("result")
                     }' "$m"
             else
-                echo "| $name | - | - | - | - | - | - | - | - | - | - | - | - | - | not run |"
+                echo "| $name | - | - | - | - | - | - | - | - | - | - | - | - | - | - | not run |"
             fi
         done
     } > "$out"

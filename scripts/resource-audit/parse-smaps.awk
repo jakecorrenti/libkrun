@@ -6,6 +6,7 @@
 #   MAP      <size> <rss> <anon> <pss> <uss> <perms> <label>   (per mapping)
 #   TOTAL    <rss> <anon> <pss> <uss> <shared>
 #   GUESTRAM <method> <nregions> <rss> <anon>
+#   KERNELCOW <anon_sum>
 #   ROLLUP   <category> <rss> <anon>
 #
 # Guest-RAM identification: libkrun mmaps guest RAM as anonymous rw regions.
@@ -19,6 +20,14 @@
 # ("largest-anon fallback"). The small low-memory region below the kernel
 # load address is not separable from other anonymous mappings and is counted
 # under "other-anon" (its RSS is typically far below 1 MiB).
+#
+# KERNELCOW is the anonymous part of the libkrunfw mapping(s) (any variant:
+# libkrunfw.so.5*, libkrunfw-sev/tdx, ...). That mapping is the zero-copy
+# guest-kernel blob, so its private pages are the guest kernel's boot-time
+# writes (relocation pass over the image plus .data/.bss), not VMM cost;
+# the .so's own small data segment rides along and is included. 0 when no
+# such mapping exists (external-kernel and firmware payloads copy the kernel
+# into guest RAM instead; non-libkrun processes have none).
 #
 # Categories: guest-RAM, kvm (anon_inode:kvm-*), libkrun.so (includes
 # libkrun_init.so, the embedded guest init), libkrunfw.so, system-libs
@@ -169,6 +178,10 @@ END {
         }
         print "MAP", m_size[i], m_rss[i], m_anon[i], m_pss[i], m_uss[i], m_perms[i], label
 
+        if (m_path[i] ~ /libkrunfw/ && m_anon[i] > 0) {
+            kcow_anon += m_anon[i]
+        }
+
         cat = category(i)
         c_rss[cat] += m_rss[i]
         c_anon[cat] += m_anon[i]
@@ -181,6 +194,7 @@ END {
 
     print "TOTAL", t_rss + 0, t_anon + 0, t_pss + 0, t_uss + 0, t_shared + 0
     print "GUESTRAM", method, gram_n + 0, gram_rss + 0, gram_anon + 0
+    print "KERNELCOW", kcow_anon + 0
 
     split("guest-RAM kvm libkrun.so libkrunfw.so system-libs launcher heap stack other-anon other-file", order, " ")
     for (j = 1; j <= 10; j++) {

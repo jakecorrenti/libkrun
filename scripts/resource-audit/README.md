@@ -143,8 +143,20 @@ per-VM cost.
   and THP usage.
 - **guest_ram_rss**: RSS of the mapping(s) holding guest RAM. libkrun mmaps
   guest RAM as anonymous regions; see "Limitations" for how they are found.
-- **vmm_private_anon** = `Anonymous − guest_ram_anon`: the headline
-  "libkrun overhead" number — anonymous memory that is not guest RAM.
+- **vmm_private_anon** = `Anonymous − guest_ram_anon`: all anonymous memory
+  that is not guest RAM. For a libkrunfw payload this is mostly *not*
+  library cost — see the next two metrics.
+- **kernel_image_cow**: the anonymous part of the `libkrunfw.so` mapping.
+  libkrun maps the guest kernel zero-copy out of the library file, so the
+  guest kernel's boot-time writes (the relocation pass over the image plus
+  `.data`/`.bss` initialization, ~15 MiB) show up as private anonymous
+  memory *inside the libkrunfw mapping* — guest memory misattributed to the
+  process. External-kernel and firmware payloads copy the kernel into guest
+  RAM instead, so they report 0.
+- **framework_private_anon** = `vmm_private_anon − kernel_image_cow`: the
+  VMM library's own per-instance cost — heaps, thread stacks, device state.
+  For external-kernel payloads (`kernel_image_cow` = 0) it equals
+  `vmm_private_anon`.
 - **cpu_user/sys/guest**: `utime`, `stime`, `guest_time` from
   `/proc/PID/stat` (converted with `getconf CLK_TCK`). `guest_time` is CPU
   burned inside the guest by the vcpu threads.
@@ -286,11 +298,12 @@ The interesting split for running many VMs per host:
 - **guest_ram_rss** is guest-private by definition, but only the pages the
   guest actually touches are resident (a quiescent 256 MiB guest shows
   ~25 MiB).
-- **vmm_private_anon** is the per-instance VMM cost. With a libkrunfw
-  payload it is dominated by the ~16 MiB of dirty kernel-`.data` pages
-  inside `libkrunfw.so` (the guest kernel's COW of the shared image —
-  that memory belongs to the guest, not the VMM); the pure VMM share
-  (heaps, thread stacks, device state) is visible in the category rollup.
+- **framework_private_anon** is the per-instance library cost (heaps, thread
+  stacks, device state — a few hundred KiB). `vmm_private_anon` above it is
+  dominated by `kernel_image_cow` (~15-16 MiB of guest-kernel boot writes
+  inside the shared `libkrunfw.so` image) — guest memory, not VMM memory,
+  but per-instance and private, so it *does* scale with VM count even
+  though the clean image below it is shared.
 - **threads/fds/eventfds** are per-instance kernel resources; the summary
   breaks them down (`fc_vcpu`, `fs worker`, event loop, KVM worker threads
   such as `kvm-nx-lpage-re` on recent host kernels).
@@ -300,6 +313,42 @@ The interesting split for running many VMs per host:
 Compare configurations by diffing `summary.md` rows; drill into
 `summary.txt` (top mappings, category rollup) to attribute a delta to a
 device, a library, or the kernel.
+
+### Measuring the library alone
+
+`framework_private_anon` isolates the library's per-instance cost at run
+time. To also get its loaded-and-idle footprint, wrap a binary that links
+libkrun but never starts a VM:
+
+```c
+/* libkrun-loadonly.c — links against libkrun, calls nothing */
+#include <stdio.h>
+#include <unistd.h>
+
+int main(void)
+{
+    printf("AUDIT_GUEST_READY\n");
+    fflush(stdout);
+    for (;;)
+        pause();
+}
+```
+
+```sh
+cc -O2 libkrun-loadonly.c -o libkrun-loadonly -L/usr/local/lib64 -lkrun -lkrun_init \
+   -Wl,-rpath,/usr/local/lib64
+./run-audit.sh --name load-only -- libkrun-loadonly
+```
+
+Reference numbers from the measurements that motivated the split: the
+loaded-and-idle library costs ~530 KiB RSS (~380 KiB relocation-touched
+code + ~150 KiB private data); a running VM adds ~2.5 MiB of shareable
+code working set and ~0.5 MiB `framework_private_anon` per instance;
+libkrun makes exactly one large direct mmap per VM (guest RAM) and routes
+everything else through the allocator into small heap/arena numbers.
+Kernel-side KVM allocations (the per-VM `struct kvm`, vcpu structures,
+dirty rings) are charged to kernel memory, not to the process — they remain
+the audit's blind spot (see Limitations).
 
 ## Limitations
 
@@ -324,10 +373,10 @@ device, a library, or the kernel.
   claimed ("multi-region"). The last resort is the largest anonymous
   mapping ("largest-anon fallback"). The method used is printed in every
   summary and annotated map.
-- **`vmm_private_anon` overstates pure VMM overhead for libkrunfw
-  payloads** by the guest kernel's dirty `.data` inside `libkrunfw.so`
-  (~16 MiB) — that memory belongs to the guest, not the VMM. The category
-  rollup separates it.
+- **`vmm_private_anon` overstates library overhead for libkrunfw
+  payloads** by `kernel_image_cow` (~15-16 MiB) — that memory belongs to
+  the guest. Use `framework_private_anon` for the library's own cost; the
+  category rollup separates the same split per mapping.
 - **Sampling is external and unprivileged** — one `awk`/`find` pass per
   interval; the perturbation is negligible at 1 Hz but visible in the
   samples if you shrink the interval drastically. During a rising-RSS
