@@ -5,7 +5,8 @@
 # For every test in the matrix (tests.conf) this script boots a real microVM
 # through the installed libkrun/libkrunfw/libkrun_init, waits for the guest
 # workload to report readiness, samples /proc/<harness-pid> for a while, and
-# writes per-test summaries plus a run-level comparison table.
+# writes per-test summaries plus a run-level comparison table. --wrap runs
+# an arbitrary VM launcher through the same measurement pipeline.
 #
 # Methodology modeled on QEMU's "resource audit" article (section
 # "Analyzing Runtime Resource Usage"):
@@ -25,8 +26,10 @@ HARNESS="$SCRIPT_DIR/build/krun-harness"
 PAUSE="$SCRIPT_DIR/build/pause"
 BLK_SETUP="$SCRIPT_DIR/build/blk-setup"
 LABEL_SHIM="$SCRIPT_DIR/build/mmap-label.so"
+PHASE_HOOK="$SCRIPT_DIR/build/phase-hook.so"
 VMA_PROBE="$SCRIPT_DIR/build/vma-probe"
 CLK_TCK=$(getconf CLK_TCK)
+CSV_HEADER="elapsed_s,vmrss_kib,rss_anon_kib,rss_file_kib,pss_kib,uss_kib,anon_kib,pte_kib,threads,fds,cpu_user_s,cpu_sys_s,cpu_guest_s"
 
 CONFIG_FILE="$SCRIPT_DIR/tests.conf"
 RESULTS_DIR=""
@@ -38,12 +41,28 @@ DRY_RUN=0
 REBUILD=0
 KEEP_GOING=0
 SELECTED=()
+WRAP=0
+WRAP_NAME=""
+WRAP_RAM_MIB=0
+WRAP_PHASE_PAUSE=10
+WRAP_LABELS=1
+WRAP_CMD=()
+
+# Measurement state shared by the matrix and --wrap paths; the phase helpers
+# below communicate through these.
+MEAS_LAUNCH_TIME=""
+RESULT=""
+REASON=""
+READY_AFTER=""
+READY_FROM=""
+PHASE_SEEN=0
 
 DEFAULT_APPEND_CMDLINE=""
 PAUSE_BUILD_CMD=""
 HARNESS_BUILD_CMD=""
 BLK_SETUP_BUILD_CMD=""
 LABEL_SHIM_BUILD_CMD=""
+PHASE_HOOK_BUILD_CMD=""
 VMA_PROBE_BUILD_CMD=""
 STRACE_K_OK=0
 STRACE_KILL_OK=0
@@ -54,8 +73,23 @@ COMPLETED=()
 usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS] [TEST ...]
+       $(basename "$0") --wrap [WRAP-OPTIONS] -- COMMAND [ARGS...]
 
-Runs the libkrun resource-audit test matrix (default: all tests in it).
+Runs the libkrun resource-audit test matrix (default: all tests in it), or
+wraps an arbitrary VM launcher in the same measurement pipeline.
+
+Wrap options (--wrap mode; the command after -- runs from your cwd with the
+audit's environment, its console captured, /proc/<pid> sampled, and the same
+reports generated as for matrix tests):
+  --wrap            measure the COMMAND after -- instead of the matrix
+  --name NAME       result directory name (default: basename of COMMAND)
+  --ram-mib N       guest RAM size for exact guest-RAM labeling; without it
+                    the multi-region identification applies (0 = unknown)
+  --phase-pause S   seconds to hold a libkrun launcher at krun_vmm_run()
+                    for pre-boot sampling via the phase-hook interposer
+                    (default: 10)
+  --no-labels       do not LD_PRELOAD the mmap-label shim (the phase hook
+                    stays: it is inert without KRUN_AUDIT_PHASE_PAUSE)
 
 Options:
   --config FILE     test matrix to use (default: tests.conf next to this script)
@@ -88,6 +122,7 @@ die() {
 
 cleanup() {
     if [[ -n "$CURRENT_PID" ]] && kill -0 "$CURRENT_PID" 2>/dev/null; then
+        kill -CONT "$CURRENT_PID" 2>/dev/null || true
         kill -TERM "$CURRENT_PID" 2>/dev/null || true
         if [[ -n "$CURRENT_PG" ]]; then
             kill -TERM -- "-$CURRENT_PG" 2>/dev/null || true
@@ -130,6 +165,30 @@ proc_field() { # proc_field FILE "Key:" — value from a "Key: value kB" proc fi
     awk -v k="$2" '$1 == k { print $2; exit }' "$1" 2>/dev/null || true
 }
 
+status_field() { # status_field FILE "Key:" — value from a "Key: N kB" status line
+    # Pure bash: the wrap fast-poll reads this twice per iteration, where an
+    # awk spawn per read would dominate the capture cost.
+    local line key=$2
+    while IFS= read -r line; do
+        if [[ $line == "$key"* ]]; then
+            line=${line#"$key"}
+            line=${line//[[:space:]]/}
+            printf '%s' "${line%kB}"
+            return 0
+        fi
+    done < "$1"
+    return 1
+}
+
+signed_kib() { # signed_kib DELTA — "+N" or "-N", never the "+-N" a bare prefix renders
+    local d=$1
+    if (( d < 0 )); then
+        echo "$d"
+    else
+        echo "+$d"
+    fi
+}
+
 build_binaries() {
     mkdir -p "$SCRIPT_DIR/build"
 
@@ -166,6 +225,11 @@ build_binaries() {
         LABEL_SHIM_BUILD_CMD="$CC -O2 -shared -fPIC -o build/mmap-label.so mmap-label.c -ldl"
     fi
 
+    if [[ ! -f "$PHASE_HOOK" || "$SCRIPT_DIR/phase-hook.c" -nt "$PHASE_HOOK" || $REBUILD -eq 1 ]]; then
+        "$CC" -O2 -shared -fPIC -o "$PHASE_HOOK" "$SCRIPT_DIR/phase-hook.c" -ldl
+        PHASE_HOOK_BUILD_CMD="$CC -O2 -shared -fPIC -o build/phase-hook.so phase-hook.c -ldl"
+    fi
+
     if [[ ! -f "$VMA_PROBE" || "$SCRIPT_DIR/vma-probe.c" -nt "$VMA_PROBE" || $REBUILD -eq 1 ]]; then
         "$CC" -O2 -o "$VMA_PROBE" "$SCRIPT_DIR/vma-probe.c"
         VMA_PROBE_BUILD_CMD="$CC -O2 -o build/vma-probe vma-probe.c"
@@ -191,6 +255,9 @@ sample_once() { # sample_once PID CSV_FILE SAMPLING_START — append one CSV row
 
     # find tolerates fds appearing or disappearing mid-scan
     fds=$(find "/proc/$pid/fd" -mindepth 1 -maxdepth 1 -printf '.' 2>/dev/null | wc -c) || fds=0
+    # exported for the wrap loop's change-triggered listing refresh and the
+    # rise-chase trigger
+    SAMPLE_FDS=$fds
     elapsed=$(elapsed_between "$start")
 
     # /proc/PID/stat: utime, stime and guest_time are fields 14, 15 and 43;
@@ -225,11 +292,47 @@ sample_once() { # sample_once PID CSV_FILE SAMPLING_START — append one CSV row
     ' "/proc/$pid/status" "/proc/$pid/smaps_rollup" "/proc/$pid/stat") || return 1
 
     echo "$row" >> "$out"
+    # the wrap rise-chase compares against this: a rise can start in the
+    # ~15ms between the checkpoint capture and this read
+    SAMPLE_RSS=$(cut -d, -f2 <<< "$row")
 }
 
-take_final_snapshot() { # take_final_snapshot PID TEST_DIR
-    local pid=$1 dir=$2
-    local fd target t lib
+capture_proc_listings() { # capture_proc_listings PID DIR [PREFIX]
+    # Writes ${PREFIX}fds.txt, ${PREFIX}threads.txt and ${PREFIX}task-stats.txt.
+    # Shared by the live final snapshot and the wrap insurance checkpoint so
+    # both paths produce identical listings.
+    local pid=$1 dir=$2 prefix=${3:-}
+    local fd target t tid sp
+
+    : > "$dir/${prefix}fds.txt"
+    for fd in /proc/$pid/fd/*; do
+        [[ -L "$fd" ]] || continue
+        target=$(readlink "$fd" 2>/dev/null) || target="(unreadable)"
+        printf '%s %s\n' "${fd##*/}" "$target" >> "$dir/${prefix}fds.txt"
+    done
+
+    : > "$dir/${prefix}threads.txt"
+    for t in /proc/$pid/task/*; do
+        [[ -d "$t" ]] || continue
+        printf '%s %s\n' "${t##*/}" "$(cat "$t/comm" 2>/dev/null)" >> "$dir/${prefix}threads.txt"
+    done
+
+    # One "tid comm sp" line per task. The sp is the user stack pointer from
+    # the thread's blocked syscall (/proc/.../syscall, field 8): stat's
+    # startstack is mm-wide (the same main-stack value for every thread) and
+    # cannot attribute per-thread stacks. Threads not in a syscall report 0.
+    : > "$dir/${prefix}task-stats.txt"
+    for t in /proc/$pid/task/*; do
+        [[ -d "$t" ]] || continue
+        tid=${t##*/}
+        sp=$(awk '{ print $8 }' "$t/syscall" 2>/dev/null) || sp=""
+        printf '%s %s %s\n' "$tid" "$(cat "$t/comm" 2>/dev/null)" "${sp:-0}" >> "$dir/${prefix}task-stats.txt"
+    done
+}
+
+take_final_snapshot() { # take_final_snapshot PID TEST_DIR [BINARY]
+    local pid=$1 dir=$2 binary=${3:-$HARNESS}
+    local lib
 
     cp "/proc/$pid/status" "$dir/final-status.txt" 2>/dev/null || true
     cp "/proc/$pid/smaps" "$dir/final-smaps.txt" 2>/dev/null || true
@@ -237,34 +340,10 @@ take_final_snapshot() { # take_final_snapshot PID TEST_DIR
     cp "/proc/$pid/maps" "$dir/final-maps.txt" 2>/dev/null || true
     cp "/proc/$pid/io" "$dir/final-io.txt" 2>/dev/null || true
 
-    : > "$dir/fds.txt"
-    for fd in /proc/$pid/fd/*; do
-        [[ -L "$fd" ]] || continue
-        target=$(readlink "$fd" 2>/dev/null) || target="(unreadable)"
-        printf '%s %s\n' "${fd##*/}" "$target" >> "$dir/fds.txt"
-    done
-
-    : > "$dir/threads.txt"
-    for t in /proc/$pid/task/*; do
-        [[ -d "$t" ]] || continue
-        printf '%s %s\n' "${t##*/}" "$(cat "$t/comm" 2>/dev/null)" >> "$dir/threads.txt"
-    done
-
-    # One "tid comm sp" line per task. The sp is the user stack pointer from
-    # the thread's blocked syscall (/proc/.../syscall, field 8): stat's
-    # startstack is mm-wide (the same main-stack value for every thread) and
-    # cannot attribute per-thread stacks. Threads not in a syscall report 0.
-    : > "$dir/task-stats.txt"
-    local tid sp
-    for t in /proc/$pid/task/*; do
-        [[ -d "$t" ]] || continue
-        tid=${t##*/}
-        sp=$(awk '{ print $8 }' "$t/syscall" 2>/dev/null) || sp=""
-        printf '%s %s %s\n' "$tid" "$(cat "$t/comm" 2>/dev/null)" "${sp:-0}" >> "$dir/task-stats.txt"
-    done
+    capture_proc_listings "$pid" "$dir"
 
     {
-        ldd "$HARNESS" 2>/dev/null || true
+        ldd "$binary" 2>/dev/null || true
         echo
         echo "krun libraries actually mapped by the harness (from final-maps.txt):"
         awk '{ for (i = 6; i <= NF; i++) if ($i ~ /\/libkrun[^/]*\.so/) print $i }' "$dir/final-maps.txt" 2>/dev/null \
@@ -295,10 +374,11 @@ classify_fds() { # classify_fds FDS_FILE — "total=N, class=cnt, ..." summary
         | sort | awk '{ printf "%s%s=%s", sep, $1, $2; sep = ", " } END { if (NR > 0) printf "\n" }'
 }
 
-write_summary() { # write_summary TEST_DIR NAME VCPUS RAM_MIB TRANSPORT PAYLOAD ROOT DEVICES RESULT REASON READY_AFTER DURATION INTERVAL
-    local test_dir=$1 name=$2 vcpus=$3 ram_mib=$4 transport=$5 payload=$6
-    local root_mode=$7 devices=$8 result=$9 reason=${10} ready_after=${11}
-    local duration=${12} interval=${13}
+write_summary() { # write_summary TEST_DIR NAME CONFIG_LABEL RAM_MIB RESULT_LINE DURATION INTERVAL [METRICS_LINES...]
+    local test_dir=$1 name=$2 config_label=$3 ram_mib=$4 result_line=$5
+    local duration=$6 interval=$7
+    shift 7
+    local result_word="${result_line%% (*}"
 
     local status="$test_dir/final-status.txt"
     local rollup="$test_dir/final-smaps_rollup.txt"
@@ -382,15 +462,10 @@ write_summary() { # write_summary TEST_DIR NAME VCPUS RAM_MIB TRANSPORT PAYLOAD 
 
     {
         echo "Test: $name"
-        echo "Config: vcpus=$vcpus ram_mib=$ram_mib transport=$transport payload=$payload root=$root_mode devices=$devices"
-        if [[ "$result" == "OK" ]]; then
-            if [[ "$ready_after" == "n/a" ]]; then
-                echo "Result: OK (no readiness marker for this payload; settle wait completed)"
-            else
-                echo "Result: OK (guest ready after ${ready_after}s)"
-            fi
-        else
-            echo "Result: FAILED ($reason)"
+        echo "Config: $config_label"
+        echo "Result: $result_line"
+        if [[ -f "$test_dir/final-snapshot-note.txt" ]]; then
+            cat "$test_dir/final-snapshot-note.txt"
         fi
         echo "Samples: $nsamples over ${span_s:-0}s (interval ${interval}s, duration ${duration}s)"
         echo
@@ -437,7 +512,7 @@ write_summary() { # write_summary TEST_DIR NAME VCPUS RAM_MIB TRANSPORT PAYLOAD 
 
         echo "[Derived]"
         if [[ $have_preboot -eq 1 && -n "$vmrss" && -n "$anon_r" ]]; then
-            echo "boot cost: VmRSS +$(( vmrss - pb_vmrss )) KiB, Anonymous +$(( anon_r - pb_anon )) KiB (guest RAM + kernel COW)"
+            echo "boot cost: VmRSS $(signed_kib $(( vmrss - pb_vmrss ))) KiB, Anonymous $(signed_kib $(( anon_r - pb_anon ))) KiB (guest RAM + kernel COW)"
         fi
         echo "guest_ram_rss: $gr_rss KiB (method: $gr_method, $gr_n region(s))"
         echo "vmm_private_anon: $vmm_private_anon KiB   (= Anonymous $t_anon - guest-RAM anon $gr_anon; the headline libkrun overhead)"
@@ -497,13 +572,11 @@ write_summary() { # write_summary TEST_DIR NAME VCPUS RAM_MIB TRANSPORT PAYLOAD 
     } > "$test_dir/summary.txt"
 
     {
-        echo "vcpus=$vcpus"
-        echo "ram_mib=$ram_mib"
-        echo "transport=$transport"
-        echo "payload=$payload"
-        echo "root=$root_mode"
-        echo "devices=$devices"
-        echo "result=$result"
+        local ml
+        for ml in "$@"; do
+            echo "$ml"
+        done
+        echo "result=$result_word"
         echo "vmrss_kib=${vmrss:--}"
         echo "rss_anon_kib=${rss_anon:--}"
         if [[ -n "$pss" ]]; then
@@ -637,6 +710,7 @@ write_meta() {
         echo "pause build: ${PAUSE_BUILD_CMD:-cached from previous run}"
         echo "blk-setup build: ${BLK_SETUP_BUILD_CMD:-cached from previous run}"
         echo "mmap-label shim: ${LABEL_SHIM_BUILD_CMD:-cached from previous run}"
+        echo "phase-hook shim: ${PHASE_HOOK_BUILD_CMD:-cached from previous run}"
         if command -v strace >/dev/null 2>&1; then
             echo "strace: $(command -v strace) (callstacks: $([[ $STRACE_K_OK -eq 1 ]] && echo yes || echo no))"
         else
@@ -649,6 +723,117 @@ write_meta() {
         echo "  and guest RAM is identified by size only (see parse-smaps.awk)."
         echo "vma probe build: ${VMA_PROBE_BUILD_CMD:-cached from previous run}"
     } > "$RESULTS_DIR/meta.txt"
+}
+
+# ----- shared measurement core (matrix and --wrap paths) -----
+
+preboot_phase() { # preboot_phase MODE VM_PID PID TEST_DIR CONSOLE SETTLE INTERVAL PHASE_SECS
+    # Wait for the VMM-built marker, sample the pause window, snapshot.
+    # MODE "matrix" fails the test when the marker is missing or the process
+    # died; MODE "wrap" just skips the phase — launchers that do not call
+    # krun_vmm_run() through the PLT never emit it.
+    local mode=$1 vm_pid=$2 pid=$3 dir=$4 console=$5 settle=$6 interval=$7 phase=$8
+
+    PHASE_SEEN=0
+    [[ $phase -gt 0 ]] || return 0
+    while :; do
+        if grep -aFq "AUDIT_PHASE_VMM_BUILT" "$console" 2>/dev/null; then
+            PHASE_SEEN=1
+            break
+        fi
+        if ! proc_alive "$vm_pid" || ! proc_alive "$pid"; then
+            if [[ $mode == matrix ]]; then
+                RESULT="FAILED"
+                REASON="harness exited before the VMM-built marker (see guest-console.log)"
+            fi
+            return 0
+        fi
+        if time_up "$MEAS_LAUNCH_TIME" "$settle"; then
+            if [[ $mode == matrix ]]; then
+                RESULT="FAILED"
+                REASON="VMM-built marker not found within ${settle}s (see guest-console.log)"
+            fi
+            return 0
+        fi
+        sleep 0.2
+    done
+    if [[ $mode == matrix && "$RESULT" != "OK" ]]; then
+        return 0
+    fi
+
+    # The launcher sleeps PHASE_SECS from the marker; keep a 1s safety margin
+    # because marker detection lags and a libkrun guest reaches readiness
+    # within ~0.2s of the sleep ending — sampling into the guest phase would
+    # corrupt the split.
+    local preboot_csv="$dir/samples-preboot.csv"
+    echo "$CSV_HEADER" > "$preboot_csv"
+    local preboot_start=$EPOCHREALTIME
+    local preboot_n=$(( (phase - 1) / interval ))
+    if (( preboot_n < 1 )); then preboot_n=1; fi
+    local pi
+    for ((pi = 0; pi < preboot_n; pi++)); do
+        if ! sample_once "$vm_pid" "$preboot_csv" "$preboot_start"; then
+            if [[ $mode == matrix ]]; then
+                RESULT="FAILED"
+                REASON="harness exited during pre-boot sampling"
+            fi
+            return 0
+        fi
+        if (( pi < preboot_n - 1 )); then
+            sleep "$interval"
+        fi
+    done
+    if proc_alive "$vm_pid"; then
+        cat "/proc/$vm_pid/status" > "$dir/preboot-status.txt" 2>/dev/null || true
+        cat "/proc/$vm_pid/smaps" > "$dir/preboot-smaps.txt" 2>/dev/null || true
+        cat "/proc/$vm_pid/maps" > "$dir/preboot-maps.txt" 2>/dev/null || true
+        cat "/proc/$vm_pid/io" > "$dir/preboot-io.txt" 2>/dev/null || true
+    fi
+    # the guest only starts executing when the pause window closes
+    READY_FROM=$EPOCHREALTIME
+}
+
+sample_window() { # sample_window VM_PID CSV START COUNT INTERVAL DEATH_REASON
+    local vm_pid=$1 csv=$2 start=$3 n=$4 interval=$5 death=$6 i
+
+    if (( n < 1 )); then n=1; fi
+    for ((i = 0; i < n; i++)); do
+        if ! sample_once "$vm_pid" "$csv" "$start"; then
+            RESULT="FAILED"
+            REASON="$death"
+            return 1
+        fi
+        if (( i < n - 1 )); then
+            sleep "$interval"
+        fi
+    done
+}
+
+teardown_launcher() { # teardown_launcher PID VM_PID PG — TERM, then KILL, then reap
+    local pid=$1 vm_pid=$2 pg=$3
+
+    # undo a chase freeze: a stopped process pockets TERM until continued
+    kill -CONT "$pid" "$vm_pid" 2>/dev/null || true
+    if proc_alive "$pid" || proc_alive "$vm_pid"; then
+        kill -TERM "$pid" "$vm_pid" 2>/dev/null || true
+        if [[ -n "$pg" ]]; then
+            kill -TERM -- "-$pg" 2>/dev/null || true
+        fi
+        local waited=0
+        while (proc_alive "$pid" || proc_alive "$vm_pid") && (( waited < 100 )); do
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+        if proc_alive "$pid" || proc_alive "$vm_pid"; then
+            kill -KILL "$pid" "$vm_pid" 2>/dev/null || true
+            if [[ -n "$pg" ]]; then
+                kill -KILL -- "-$pg" 2>/dev/null || true
+            fi
+        fi
+    fi
+    wait "$pid" 2>/dev/null || true
+    CURRENT_PID=""
+    CURRENT_PG=""
 }
 
 run_test() { # run_test NAME — returns nonzero if the test failed
@@ -828,77 +1013,30 @@ run_test() { # run_test NAME — returns nonzero if the test failed
         vm_pid=${child:-$pid}
     fi
 
-    local launch_time=$EPOCHREALTIME
-    local result="OK" reason="" ready_after=""
-    local ready_from=$launch_time
-    local csv_header="elapsed_s,vmrss_kib,rss_anon_kib,rss_file_kib,pss_kib,uss_kib,anon_kib,pte_kib,threads,fds,cpu_user_s,cpu_sys_s,cpu_guest_s"
+    MEAS_LAUNCH_TIME=$EPOCHREALTIME
+    RESULT="OK"
+    REASON=""
+    READY_AFTER=""
+    READY_FROM=$MEAS_LAUNCH_TIME
 
-    if [[ "$pause_before_run" -gt 0 ]]; then
-        # Phase 1: VMM built (KVM VM, devices, guest RAM, kernel inserted),
-        # guest not executing yet. The harness sleeps pause_before_run seconds
-        # from the marker; keep a 1s safety margin because marker detection
-        # lags and the guest reaches readiness within ~0.2s of the sleep
-        # ending — sampling into the guest phase would corrupt the split.
-        local phase_seen=0
-        while :; do
-            if grep -aFq "AUDIT_PHASE_VMM_BUILT" "$console_log" 2>/dev/null; then
-                phase_seen=1
-                break
-            fi
-            if ! proc_alive "$vm_pid" || ! proc_alive "$pid"; then
-                result="FAILED"
-                reason="harness exited before the VMM-built marker (see guest-console.log)"
-                break
-            fi
-            if time_up "$launch_time" "$settle"; then
-                result="FAILED"
-                reason="VMM-built marker not found within ${settle}s (see guest-console.log)"
-                break
-            fi
-            sleep 0.2
-        done
-        if [[ $phase_seen -eq 1 && "$result" == "OK" ]]; then
-            local preboot_csv="$test_dir/samples-preboot.csv"
-            echo "$csv_header" > "$preboot_csv"
-            local preboot_start=$EPOCHREALTIME
-            local preboot_n=$(( (pause_before_run - 1) / interval ))
-            if (( preboot_n < 1 )); then preboot_n=1; fi
-            local pi
-            for ((pi = 0; pi < preboot_n; pi++)); do
-                if ! sample_once "$vm_pid" "$preboot_csv" "$preboot_start"; then
-                    result="FAILED"
-                    reason="harness exited during pre-boot sampling"
-                    break
-                fi
-                if (( pi < preboot_n - 1 )); then
-                    sleep "$interval"
-                fi
-            done
-            if [[ "$result" == "OK" ]] && proc_alive "$vm_pid"; then
-                cat "/proc/$vm_pid/status" > "$test_dir/preboot-status.txt" 2>/dev/null || true
-                cat "/proc/$vm_pid/smaps" > "$test_dir/preboot-smaps.txt" 2>/dev/null || true
-                cat "/proc/$vm_pid/maps" > "$test_dir/preboot-maps.txt" 2>/dev/null || true
-                cat "/proc/$vm_pid/io" > "$test_dir/preboot-io.txt" 2>/dev/null || true
-            fi
-            # the guest only starts executing when the pause window closes
-            ready_from=$EPOCHREALTIME
-        fi
-    fi
+    # Phase 1 (harness --pause-before-run): VMM built, guest not executing.
+    preboot_phase matrix "$vm_pid" "$pid" "$test_dir" "$console_log" \
+        "$settle" "$interval" "$pause_before_run"
 
     if [[ -n "$ready_marker" ]]; then
         while :; do
             if grep -aFq "$ready_marker" "$console_log" 2>/dev/null; then
-                ready_after=$(elapsed_between "$launch_time")
+                READY_AFTER=$(elapsed_between "$MEAS_LAUNCH_TIME")
                 break
             fi
             if ! proc_alive "$vm_pid" || ! proc_alive "$pid"; then
-                result="FAILED"
-                reason="harness exited before the readiness marker (see guest-console.log)"
+                RESULT="FAILED"
+                REASON="harness exited before the readiness marker (see guest-console.log)"
                 break
             fi
-            if time_up "$ready_from" "$settle"; then
-                result="FAILED"
-                reason="readiness marker not found within ${settle}s (see guest-console.log)"
+            if time_up "$READY_FROM" "$settle"; then
+                RESULT="FAILED"
+                REASON="readiness marker not found within ${settle}s (see guest-console.log)"
                 break
             fi
             sleep 0.2
@@ -907,66 +1045,353 @@ run_test() { # run_test NAME — returns nonzero if the test failed
         # Firmware payloads boot themselves; there is no marker to wait for.
         sleep "$settle"
         if proc_alive "$vm_pid"; then
-            ready_after="n/a"
+            READY_AFTER="n/a"
         else
-            result="FAILED"
-            reason="harness exited during the settle period (see guest-console.log)"
+            RESULT="FAILED"
+            REASON="harness exited during the settle period (see guest-console.log)"
         fi
     fi
 
     local samples="$test_dir/samples.csv"
-    echo "$csv_header" > "$samples"
+    echo "$CSV_HEADER" > "$samples"
 
-    if [[ "$result" == "OK" ]]; then
-        local sample_start=$EPOCHREALTIME
-        local n=$(( duration / interval ))
-        if (( n < 1 )); then n=1; fi
-        local i
-        for ((i = 0; i < n; i++)); do
-            if ! sample_once "$vm_pid" "$samples" "$sample_start"; then
-                result="FAILED"
-                reason="harness exited during sampling"
-                break
-            fi
-            if (( i < n - 1 )); then
-                sleep "$interval"
-            fi
-        done
+    if [[ "$RESULT" == "OK" ]]; then
+        sample_window "$vm_pid" "$samples" "$EPOCHREALTIME" \
+            $(( duration / interval )) "$interval" "harness exited during sampling"
     fi
 
     if proc_alive "$vm_pid"; then
         take_final_snapshot "$vm_pid" "$test_dir"
     fi
 
-    if proc_alive "$pid" || proc_alive "$vm_pid"; then
-        kill -TERM "$pid" "$vm_pid" 2>/dev/null || true
-        if [[ -n "$launcher_pg" ]]; then
-            kill -TERM -- "-$pid" 2>/dev/null || true
+    teardown_launcher "$pid" "$vm_pid" "$launcher_pg"
+
+    local result_line
+    if [[ "$RESULT" == "OK" ]]; then
+        if [[ "$READY_AFTER" == "n/a" ]]; then
+            result_line="OK (no readiness marker for this payload; settle wait completed)"
+        else
+            result_line="OK (guest ready after ${READY_AFTER}s)"
         fi
-        local waited=0
-        while (proc_alive "$pid" || proc_alive "$vm_pid") && (( waited < 100 )); do
-            sleep 0.1
-            waited=$((waited + 1))
-        done
-        if proc_alive "$pid" || proc_alive "$vm_pid"; then
-            kill -KILL "$pid" "$vm_pid" 2>/dev/null || true
-            if [[ -n "$launcher_pg" ]]; then
-                kill -KILL -- "-$pid" 2>/dev/null || true
-            fi
-        fi
+    else
+        result_line="FAILED ($REASON)"
     fi
-    wait "$pid" 2>/dev/null || true
-    CURRENT_PID=""
-    CURRENT_PG=""
+    write_summary "$test_dir" "$name" \
+        "vcpus=$vcpus ram_mib=$ram_mib transport=$transport payload=$payload root=$root_mode devices=$devices" \
+        "$ram_mib" "$result_line" "$duration" "$interval" \
+        "vcpus=$vcpus" "ram_mib=$ram_mib" "transport=$transport" "payload=$payload" \
+        "root=$root_mode" "devices=$devices"
 
-    write_summary "$test_dir" "$name" "$vcpus" "$ram_mib" "$transport" "$payload" \
-        "$root_mode" "$devices" "$result" "$reason" "$ready_after" "$duration" "$interval"
-
-    if [[ "$result" == "OK" ]]; then
-        echo "  OK (guest ready after ${ready_after}s): $test_dir/summary.txt"
+    if [[ "$RESULT" == "OK" ]]; then
+        echo "  OK (guest ready after ${READY_AFTER}s): $test_dir/summary.txt"
         return 0
     fi
-    echo "  FAILED: $reason"
+    echo "  FAILED: $REASON"
+    return 1
+}
+
+wrap_capture_step() { # one insurance capture; runs in run_wrap's scope
+    # (bash dynamic scoping): reads vm_pid/test_dir/MEAS_LAUNCH_TIME and the
+    # listing-trigger state, updates cp_rss/cp_threads and the best-*
+    # checkpoint. Shared by the 0.1s fast-poll loop and the rise-chase below.
+    local snapf
+
+    # status is written LAST on purpose: the peak iteration is often also
+    # the death iteration, and a mid-loop death truncates the files after it
+    # (the shell opens the redirect before cat runs). A non-empty cp-status
+    # therefore proves the whole set was read from a living process; an
+    # empty one makes cp_rss empty and the set is never promoted, leaving
+    # the previous complete checkpoint in best-*.
+    for snapf in smaps smaps_rollup maps io status; do
+        cat "/proc/$vm_pid/$snapf" > "$test_dir/cp-$snapf.txt" 2>/dev/null || true
+    done
+    cp_rss=$(status_field "$test_dir/cp-status.txt" "VmRSS:")
+    cp_threads=$(status_field "$test_dir/cp-status.txt" "Threads:")
+
+    # The fd/thread listings cost ~15ms (a readlink per fd), so refresh
+    # them only when something plausibly changed: first iteration, a
+    # thread- or fd-count change, or a strict RSS increase. A post-
+    # teardown collapse changes the counts too, but its low RSS can never
+    # reach the best-* promotion below, so the collapsed listings are
+    # simply overwritten scratch.
+    if [[ ! -f "$test_dir/cp-fds.txt" ]] \
+            || [[ "$cp_threads" != "$list_threads" ]] \
+            || [[ "${SAMPLE_FDS:-}" != "$list_fds" ]] \
+            || { [[ -n "$cp_rss" ]] && (( cp_rss > best_rss )); }; then
+        capture_proc_listings "$vm_pid" "$test_dir" "cp-"
+        list_threads=$cp_threads
+        list_fds=${SAMPLE_FDS:-}
+        # A process can die mid-capture (the peak iteration is often the
+        # last), leaving truncated listings; the status read that armed
+        # this refresh happened before the death. Only a capture of a
+        # still-living process may reach best-*, so the previous good
+        # listing survives as the near-peak one.
+        if ! proc_alive "$vm_pid"; then
+            rm -f "$test_dir/cp-fds.txt" "$test_dir/cp-threads.txt" \
+                "$test_dir/cp-task-stats.txt"
+        fi
+    fi
+
+    if [[ -n "$cp_rss" ]] && (( cp_rss >= best_rss )); then
+        best_rss=$cp_rss
+        best_at=$(elapsed_between "$MEAS_LAUNCH_TIME")
+        # -s: never let a truncated read through, even though the
+        # status-last ordering already gates the set on completeness
+        for snapf in status smaps smaps_rollup maps io fds threads task-stats; do
+            [[ -s "$test_dir/cp-$snapf.txt" ]] || continue
+            cat "$test_dir/cp-$snapf.txt" > "$test_dir/best-$snapf.txt" 2>/dev/null || true
+        done
+    fi
+}
+
+run_wrap() { # run_wrap — measure the wrapped launcher; returns nonzero on failure
+    local name=$WRAP_NAME
+    local test_dir="$RESULTS_DIR/$name"
+    mkdir -p "$test_dir"
+
+    local console_log="$test_dir/guest-console.log"
+    local ld_path="${KRUN_AUDIT_EXTRA_LD_PATH:+$KRUN_AUDIT_EXTRA_LD_PATH:}$LIBDIR"
+    # The phase hook is always preloaded: without KRUN_AUDIT_PHASE_PAUSE it is
+    # a pass-through, and launchers that never call krun_vmm_run() skip it.
+    local preload="$PHASE_HOOK"
+    if [[ $WRAP_LABELS -eq 1 ]]; then
+        preload="$preload:$LABEL_SHIM"
+    fi
+
+    {
+        echo "# environment"
+        echo "LD_LIBRARY_PATH=$ld_path"
+        echo "GLIBC_TUNABLES=glibc.mem.decorate_maps=1"
+        echo "LD_PRELOAD=$preload"
+        echo "KRUN_AUDIT_PHASE_PAUSE=$WRAP_PHASE_PAUSE"
+        echo "# knobs"
+        echo "label_mmap=$WRAP_LABELS"
+        echo "phase_pause=$WRAP_PHASE_PAUSE"
+        echo "ram_mib=$WRAP_RAM_MIB"
+        echo "# launched from the caller's cwd"
+        printf 'cmdline:'
+        printf ' %q' "${WRAP_CMD[@]}"
+        echo
+    } > "$test_dir/cmd.txt"
+
+    local -a env_cmd=(env LD_LIBRARY_PATH="$ld_path" GLIBC_TUNABLES=glibc.mem.decorate_maps=1
+                      "LD_PRELOAD=$preload" "KRUN_AUDIT_PHASE_PAUSE=$WRAP_PHASE_PAUSE"
+                      "${WRAP_CMD[@]}")
+
+    # No cd: the wrapped command's relative paths resolve from the caller's
+    # cwd, like a manual invocation.
+    ( exec "${env_cmd[@]}" </dev/null >"$console_log" 2>&1 ) &
+    local pid=$!
+    CURRENT_PID=$pid
+    CURRENT_PG=""
+    local vm_pid=$pid
+
+    MEAS_LAUNCH_TIME=$EPOCHREALTIME
+    RESULT="OK"
+    REASON=""
+    READY_AFTER=""
+    READY_FROM=$MEAS_LAUNCH_TIME
+
+    # One fast-poll loop covers the whole run: it samples into samples.csv
+    # and captures an insurance snapshot set from launch until the readiness
+    # marker or process exit. When the VMM-built marker appears (launcher
+    # calls krun_vmm_run() through the PLT), sampling switches to
+    # samples-preboot.csv for the pause window and comes back afterwards —
+    # so launchers that never emit it, or die before emitting it, still get
+    # a fully sampled run.
+    #
+    # The insurance set is captured as a whole on every iteration: the
+    # interesting window can be sub-second (the event loop spinning up after
+    # a phase pause), and a split cadence once produced mixed-state pairs —
+    # status from the post-teardown collapse, smaps from mid-run. The
+    # captures use shell redirects, not cp: procfs files are mode 444, and a
+    # cp-created copy inherits that, making every later cp onto it fail
+    # silently — which froze the old last-* files at their first capture.
+    # cp-* is the per-iteration scratch set; best-* is the peak-RSS
+    # checkpoint (>=, so a flat-at-peak run keeps it fresh) promoted to
+    # final-* when the process exits before a live snapshot can be taken.
+    local samples="$test_dir/samples.csv"
+    echo "$CSV_HEADER" > "$samples"
+    local run_start=$EPOCHREALTIME
+    local budget_start=$run_start
+    local budget
+    budget=$(awk -v a="$SETTLE" -v b="$DURATION" 'BEGIN { print a + b }')
+    local ready_seen=0 exited=0 exit_code=0 phase_done=0
+    local best_rss=0 best_at=0 cp_rss="" prev_rss=0
+    local cp_threads="" list_threads="" list_fds=""
+    # After the pre-boot phase returns (~1s before the pause ends), poll at
+    # tight cadence: the post-pause transition (event loop spin-up, workload
+    # peak, teardown, exit) is often a ~30-100ms window that a 0.1s grid can
+    # step over entirely. Covers the margin plus the transition itself.
+    local poll_sleep=0.1 tight_from=0
+    while :; do
+        if ! proc_alive "$vm_pid"; then
+            exited=1
+            break
+        fi
+        if [[ $WRAP_PHASE_PAUSE -gt 0 && $phase_done -eq 0 ]] \
+                && grep -aFq "AUDIT_PHASE_VMM_BUILT" "$console_log" 2>/dev/null; then
+            phase_done=1
+            local preboot_csv="$test_dir/samples-preboot.csv"
+            echo "$CSV_HEADER" > "$preboot_csv"
+            local preboot_start=$EPOCHREALTIME
+            local preboot_n=$(( (WRAP_PHASE_PAUSE - 1) / INTERVAL ))
+            if (( preboot_n < 1 )); then preboot_n=1; fi
+            local pi ok=1
+            for ((pi = 0; pi < preboot_n; pi++)); do
+                if ! sample_once "$vm_pid" "$preboot_csv" "$preboot_start"; then
+                    exited=1
+                    ok=0
+                    break
+                fi
+                if (( pi < preboot_n - 1 )); then
+                    sleep "$INTERVAL"
+                fi
+            done
+            if [[ $ok -eq 1 ]] && proc_alive "$vm_pid"; then
+                cat "/proc/$vm_pid/status" > "$test_dir/preboot-status.txt" 2>/dev/null || true
+                cat "/proc/$vm_pid/smaps" > "$test_dir/preboot-smaps.txt" 2>/dev/null || true
+                cat "/proc/$vm_pid/maps" > "$test_dir/preboot-maps.txt" 2>/dev/null || true
+                cat "/proc/$vm_pid/io" > "$test_dir/preboot-io.txt" 2>/dev/null || true
+            fi
+            if [[ $exited -eq 1 ]]; then
+                break
+            fi
+            # the guest only starts executing when the pause window closes
+            budget_start=$EPOCHREALTIME
+            poll_sleep=0.01
+            tight_from=$EPOCHREALTIME
+            continue
+        fi
+        if grep -aFq "AUDIT_GUEST_READY" "$console_log" 2>/dev/null; then
+            ready_seen=1
+            READY_AFTER=$(elapsed_between "$MEAS_LAUNCH_TIME")
+            break
+        fi
+        # Capture before sample_once: its /proc walks take ~15ms, and the
+        # peak window sits at the very end of short runs — sampling first
+        # would risk losing the capture to a mid-sample death.
+        wrap_capture_step
+        sample_once "$vm_pid" "$samples" "$run_start" || true
+
+        # Chase a rising RSS at tight cadence: transitions (the event loop
+        # spinning up after the phase pause, a workload's peak) are shorter
+        # than the 0.1s grid and often end in the process exiting, which
+        # would leave the peak uncaptured. Follow the rise until it settles,
+        # drops (teardown) or the process dies. Blocked only while the
+        # pre-boot phase is still pending (the marker stays in the log
+        # forever, so testing for it alone would disable the chase for the
+        # whole post-marker run). The step cap bounds a long ramp; the
+        # plateau never triggers a chase.
+        local chase_steps=0
+        while proc_alive "$vm_pid" && [[ -n "$cp_rss" ]] \
+                && (( cp_rss > prev_rss || SAMPLE_RSS > prev_rss )) \
+                && (( chase_steps < 100 )) \
+                && ! { [[ $phase_done -eq 0 ]] \
+                        && grep -aFq "AUDIT_PHASE_VMM_BUILT" "$console_log" 2>/dev/null; }; do
+            prev_rss=$cp_rss
+            chase_steps=$((chase_steps + 1))
+            # Freeze for the capture: a rising-RSS transition often ends in
+            # the process exiting within tens of milliseconds, and even a
+            # living process advances between the five file reads (several
+            # MB/s of skew during the spin-up). A frozen process can do
+            # neither — the checkpoint and its sample row are an exact
+            # point-in-time pair. The ~20ms stall is invisible to the
+            # metrics (nothing advances while stopped).
+            kill -STOP "$vm_pid" 2>/dev/null || break
+            wrap_capture_step
+            sample_once "$vm_pid" "$samples" "$run_start" || true
+            kill -CONT "$vm_pid" 2>/dev/null || true
+            if ! proc_alive "$vm_pid"; then
+                break
+            fi
+            sleep 0.01
+        done
+        prev_rss=$cp_rss
+        if time_up "$budget_start" "$budget"; then
+            break
+        fi
+        if [[ $poll_sleep != 0.1 ]] && time_up "$tight_from" 2.5; then
+            poll_sleep=0.1
+        fi
+        sleep "$poll_sleep"
+    done
+
+    local result_line
+    if [[ $exited -eq 1 ]]; then
+        # COMPLETE: the launcher ran to completion; report its exit code.
+        wait "$pid" 2>/dev/null
+        exit_code=$?
+        CURRENT_PID=""
+        local f
+        if [[ ! -f "$test_dir/final-status.txt" && -f "$test_dir/best-status.txt" ]]; then
+            # The process is gone; final-* becomes the peak-RSS checkpoint.
+            # write_summary picks up the note so the provenance is visible.
+            for f in status smaps smaps_rollup maps io; do
+                cp "$test_dir/best-$f.txt" "$test_dir/final-$f.txt"
+            done
+            # The listings keep their unprefixed names: write_summary and
+            # annotate-maps.py read fds.txt/threads.txt/task-stats.txt.
+            for f in fds threads task-stats; do
+                if [[ -f "$test_dir/best-$f.txt" ]]; then
+                    cp "$test_dir/best-$f.txt" "$test_dir/$f.txt"
+                fi
+            done
+            {
+                printf 'Note: final snapshot is the peak-RSS checkpoint during the run'
+                printf ' (VmRSS %s KiB at ~%ss, thread/fd listings captured near the peak)' \
+                    "$best_rss" "$best_at"
+                printf ' — the process exited before a live snapshot.\n'
+            } > "$test_dir/final-snapshot-note.txt"
+        fi
+        local ran
+        ran=$(elapsed_between "$MEAS_LAUNCH_TIME")
+        if [[ $exit_code -eq 0 ]]; then
+            result_line="OK (run-to-completion, exit code 0, ran ${ran}s)"
+        else
+            result_line="FAILED (exit code $exit_code)"
+        fi
+    elif [[ $ready_seen -eq 1 ]]; then
+        # STEADY: marker-gated sampling for the configured duration.
+        sample_window "$vm_pid" "$samples" "$run_start" \
+            $(( DURATION / INTERVAL )) "$INTERVAL" "launcher exited during sampling"
+        if proc_alive "$vm_pid"; then
+            take_final_snapshot "$vm_pid" "$test_dir" "${WRAP_CMD[0]}"
+        else
+            RESULT="FAILED"
+            REASON="launcher exited during sampling"
+        fi
+        teardown_launcher "$pid" "$vm_pid" ""
+        if [[ "$RESULT" == "OK" ]]; then
+            result_line="OK (guest ready after ${READY_AFTER}s)"
+        else
+            result_line="FAILED ($REASON)"
+        fi
+    else
+        # Neither marker nor exit within the budget: treat like a marker-less
+        # payload — the RUN loop already sampled the whole window.
+        if proc_alive "$vm_pid"; then
+            take_final_snapshot "$vm_pid" "$test_dir" "${WRAP_CMD[0]}"
+        fi
+        teardown_launcher "$pid" "$vm_pid" ""
+        result_line="OK (no readiness marker; settle wait completed)"
+    fi
+
+    rm -f "$test_dir"/cp-*.txt "$test_dir"/best-*.txt
+
+    local config_label
+    config_label="wrap: ${WRAP_CMD[*]}"
+    if [[ $WRAP_RAM_MIB -gt 0 ]]; then
+        config_label="$config_label (ram_mib=$WRAP_RAM_MIB)"
+    fi
+    write_summary "$test_dir" "$name" "$config_label" "$WRAP_RAM_MIB" \
+        "$result_line" "$DURATION" "$INTERVAL" "ram_mib=$WRAP_RAM_MIB"
+
+    if [[ "${result_line%% (*}" == "OK" ]]; then
+        echo "  $result_line: $test_dir/summary.txt"
+        return 0
+    fi
+    echo "  FAILED: $(awk -v s="$result_line" 'BEGIN { sub(/^FAILED \(/, ""); sub(/\)$/, ""); print s }')"
     return 1
 }
 
@@ -987,10 +1412,27 @@ main() {
             --dry-run) DRY_RUN=1; shift ;;
             --rebuild) REBUILD=1; shift ;;
             --keep-going) KEEP_GOING=1; shift ;;
+            --wrap) WRAP=1; shift ;;
+            --name) [[ $WRAP -eq 1 ]] || die "--name is only valid with --wrap"; WRAP_NAME=$2; shift 2 ;;
+            --name=*) [[ $WRAP -eq 1 ]] || die "--name is only valid with --wrap"; WRAP_NAME=${1#*=}; shift ;;
+            --ram-mib) [[ $WRAP -eq 1 ]] || die "--ram-mib is only valid with --wrap"; WRAP_RAM_MIB=$2; shift 2 ;;
+            --ram-mib=*) [[ $WRAP -eq 1 ]] || die "--ram-mib is only valid with --wrap"; WRAP_RAM_MIB=${1#*=}; shift ;;
+            --phase-pause) [[ $WRAP -eq 1 ]] || die "--phase-pause is only valid with --wrap"; WRAP_PHASE_PAUSE=$2; shift 2 ;;
+            --phase-pause=*) [[ $WRAP -eq 1 ]] || die "--phase-pause is only valid with --wrap"; WRAP_PHASE_PAUSE=${1#*=}; shift ;;
+            --no-labels) [[ $WRAP -eq 1 ]] || die "--no-labels is only valid with --wrap"; WRAP_LABELS=0; shift ;;
             -h|--help) usage; return 0 ;;
-            --) shift; SELECTED+=("$@"); break ;;
+            --)
+                shift
+                if [[ $WRAP -eq 1 ]]; then
+                    WRAP_CMD=("$@")
+                else
+                    SELECTED+=("$@")
+                fi
+                break ;;
             -*) echo "unknown option: $1" >&2; usage >&2; return 1 ;;
-            *) SELECTED+=("$1"); shift ;;
+            *)
+                [[ $WRAP -eq 0 ]] || die "wrap mode: pass the command after -- (got '$1')"
+                SELECTED+=("$1"); shift ;;
         esac
     done
 
@@ -998,6 +1440,41 @@ main() {
     [[ "$DURATION" =~ ^[0-9]+$ ]] || die "--duration must be an integer number of seconds"
     [[ "$INTERVAL" =~ ^[0-9]+$ ]] || die "--interval must be an integer number of seconds"
     [[ "$INTERVAL" -ge 1 ]] || die "--interval must be at least 1 second"
+
+    if [[ $WRAP -eq 1 ]]; then
+        [[ $DRY_RUN -eq 0 ]] || die "--dry-run is not supported with --wrap"
+        [[ ${#WRAP_CMD[@]} -gt 0 ]] || die "wrap mode: pass the command after --"
+        [[ "$WRAP_RAM_MIB" =~ ^[0-9]+$ ]] || die "--ram-mib must be a number"
+        [[ "$WRAP_PHASE_PAUSE" =~ ^[0-9]+$ ]] || die "--phase-pause must be a number of seconds"
+        if [[ -z "$WRAP_NAME" ]]; then
+            WRAP_NAME=$(basename "${WRAP_CMD[0]}")
+        fi
+        # Reuse the test-name rules: the results subdir is the name.
+        [[ "$WRAP_NAME" != */* && "$WRAP_NAME" != *..* ]] || die "invalid --name '$WRAP_NAME'"
+
+        if [[ -z "$RESULTS_DIR" ]]; then
+            RESULTS_DIR="$SCRIPT_DIR/results/$(date +%Y%m%d-%H%M%S)"
+        fi
+        if [[ -e "$RESULTS_DIR" && -n "$(ls -A "$RESULTS_DIR" 2>/dev/null)" ]]; then
+            die "results directory $RESULTS_DIR exists and is not empty (use --results DIR)"
+        fi
+        mkdir -p "$RESULTS_DIR"
+        build_binaries
+        write_meta
+
+        echo "=== wrap: $WRAP_NAME ==="
+        COMPLETED+=("$WRAP_NAME")
+        local wrap_failed=0
+        if ! run_wrap; then
+            wrap_failed=1
+        fi
+        write_run_summary
+        if [[ $wrap_failed -ne 0 ]]; then
+            return 1
+        fi
+        echo "all tests passed"
+        return 0
+    fi
 
     [[ -f "$CONFIG_FILE" ]] || die "config file not found: $CONFIG_FILE"
     # shellcheck source=tests.conf

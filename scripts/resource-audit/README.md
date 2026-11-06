@@ -15,6 +15,11 @@ prints a readiness marker and sleeps forever.
 ## Quick start
 
 ```sh
+# wrap any launcher (no matrix configuration needed):
+./run-audit.sh --wrap -- ./examples/chroot_vm ./examples/rootfs_fedora cat /etc/os-release
+```
+
+```sh
 cd scripts/resource-audit
 ./run-audit.sh                 # runs every test in tests.conf
 ./run-audit.sh minimal         # one test
@@ -129,6 +134,7 @@ stdio redirected to `guest-console.log` and samples the process from outside.
 | `parse-smaps.awk` | smaps → per-mapping rows, guest-RAM ID, category rollup |
 | `annotate-maps.py` | verbose annotated memory map, category CSV, SVG charts |
 | `mmap-label.c` | LD_PRELOAD shim naming anonymous mmaps after their callers |
+| `phase-hook.c` | LD_PRELOAD shim holding wrapped launchers at krun_vmm_run() |
 | `vma-probe.c` | functional CONFIG_ANON_VMA_NAME probe (feeds meta.txt) |
 
 Build artifacts go to `build/`, results to `results/` (both untracked).
@@ -347,6 +353,62 @@ image's `.data` (COW). Compare the two `categories.csv` files to see which
 categories moved. Expect a much smaller delta between the phases for an
 external-kernel payload (the kernel image is copied into guest RAM before
 the phase boundary, so it is already counted pre-boot).
+
+## Wrapping your own launcher
+
+`--wrap` runs any VM launcher through the same measurement pipeline as the
+matrix — no harness configuration needed:
+
+```sh
+./run-audit.sh --wrap --name chroot-vm-osrelease -- \
+    ./examples/chroot_vm ./examples/rootfs_fedora cat /etc/os-release \
+    --results /tmp/wrap-run
+```
+
+The command after `--` runs from your cwd with the audit's environment
+(`LD_LIBRARY_PATH` including any `KRUN_AUDIT_EXTRA_LD_PATH` entries,
+`GLIBC_TUNABLES=glibc.mem.decorate_maps=1`, and
+`LD_PRELOAD=phase-hook.so:mmap-label.so`; `--no-labels` drops the mmap-label
+shim). Its stdout/stderr are captured to `guest-console.log`, `/proc/<pid>`
+is sampled, and the usual reports (`summary.txt`, `maps-annotated.txt`,
+`categories.csv`, `charts/`, `metrics.txt`) land in
+`results/<name>/` exactly as for matrix tests.
+
+How a wrapped run is measured depends on what the launcher does:
+
+- **Pre-boot phase** — launchers that call `krun_vmm_run()` through the PLT
+  (dynamically linked against libkrun, like `examples/chroot_vm`) are held
+  at that boundary by the `phase-hook` LD_PRELOAD interposer for
+  `--phase-pause` seconds (default 10) after printing
+  `AUDIT_PHASE_VMM_BUILT`, giving the same `[Phase: VMM built …]` section
+  and `boot cost` line as the matrix's phased tests. Statically linked
+  launchers or non-libkrun hypervisors (e.g. qemu) simply skip this phase.
+- **Steady state** — if `AUDIT_GUEST_READY` appears on the console, sampling
+  switches to the usual marker-gated `--duration` window. Put
+  `echo AUDIT_GUEST_READY; exec /bin/sleep infinity` (or the equivalent) in
+  your guest command for a quiescent measurement.
+- **Run to completion** — if the launcher exits first, its exit code is
+  reported (`OK (run-to-completion, exit code 0, ran Xs)`; a non-zero code
+  is a FAILED result). Note the code is the *launcher's*: `chroot_vm`
+  returns 0 after `krun_vmm_run()` returns regardless of the workload's
+  own status. When the process exits before a live final snapshot can be
+  taken, `final-*` (plus `fds.txt`/`threads.txt`/`task-stats.txt`) comes
+  from the peak-RSS checkpoint captured while fast-polling — the launcher
+  is briefly SIGSTOPped for the capture during a rising-RSS transition, so
+  the promoted set is an exact point-in-time pair and the summary note
+  records its provenance.
+- **No marker, still running** — after `--settle` + `--duration` the run
+  finishes like a marker-less payload (`OK (no readiness marker; settle
+  wait completed)`).
+
+`--ram-mib N` enables the exact/merged guest-RAM identification; without it
+the self-qualifying multi-region method applies (which is what a 4 GiB
+`chroot_vm` needs anyway — its RAM is split around the 32-bit PCI gap), and
+processes without guest RAM report 0.
+
+Limitations: the launcher must run its VM in the foreground (daemonizing
+launchers are unsupported — the driver would sample the wrong process), and
+the phase hook needs a dynamically linked libkrun launcher.
 
 ## Configuring tests
 

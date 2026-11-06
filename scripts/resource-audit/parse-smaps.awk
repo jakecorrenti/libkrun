@@ -150,7 +150,8 @@ END {
         }
         if (gram_n > 0) {
             method = "multi-region"
-        } else if (lg > 0) {
+        } else if (lg > 0 && ram_kib > 0) {
+            # size-referencing fallback: meaningless without a known size
             method = "largest-anon fallback"
             gram_n = 1
             gram_rss = m_rss[lg]
