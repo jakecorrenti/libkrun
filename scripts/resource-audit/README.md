@@ -314,6 +314,64 @@ Compare configurations by diffing `summary.md` rows; drill into
 `summary.txt` (top mappings, category rollup) to attribute a delta to a
 device, a library, or the kernel.
 
+## Acting on the results
+
+Attribution is only half the job; this section translates observations
+into levers.
+
+### Symptom → diagnosis → action
+
+| observation | diagnosis | action |
+|---|---|---|
+| `kernel_image_cow` ≈ 15–16 MiB | the relocatable guest kernel's boot writes (relocation pass + `.data`/`.bss`) COW the zero-copy mapping out of `libkrunfw.so` — guest memory, not library cost | accept it as per-instance guest cost, or boot an external-kernel payload (copies the kernel into guest RAM, reports 0) when you want it inside `guest_ram_rss` instead |
+| `guest_ram_rss` ≫ what the workload needs | guest-kernel config: distro kernels can touch nearly all of RAM at boot (page init); workload page cache piles on | trim the guest kernel config, size the VM's RAM down, attach a virtio balloon, or drop caches in-guest before reporting readiness |
+| `guest_ram_rss` ≪ RAM | healthy — only touched pages are resident (a quiescent 256 MiB guest shows ~25 MiB) | none |
+| `framework_private_anon` grew vs a baseline | VMM-side allocations: per-device state, worker thread stacks, heaps | find the caller in `categories.csv` (top anon rows) and the `krun: malloc` labels in `maps-annotated.txt`; every attached device adds state plus at least one thread |
+| `file_backed_rss` large | shared page cache: libraries, the kernel image, guest workload binaries | fine at density — paid once per host; only the first instance carries it |
+| fds / threads above a device-less baseline | one eventfd set per virtqueue; one worker per device (`fs worker`, vsock muxer/reaper) | expected scaling with device count — sanity-check against a console-only baseline |
+| `VmPTE` climbing with VM count | page-table memory grows with mappings and touched pages | relevant at hundreds of VMs per host; fewer devices and a smaller guest footprint reduce it |
+| `cpu_guest_s` ≈ `--phase-pause` | the vCPU thread spins through earliest boot while the phase hook holds the launcher — not idle cost | read the post-marker `samples.csv` rows for idle CPU (≈0.001 s/sample); never quote the total as idle |
+| `boot cost` ≈ 0 on a many-vCPU guest | the guest finished booting *during* the pause; the line measures post-pause growth (event loop + workload start) | shorten `--phase-pause` to move the boundary earlier, or accept the semantics — the sum is invariant |
+| RSS drifting across `samples.csv` | guest still settling (page cache) or a genuine leak | quiescent runs are byte-stable (std 0–3 KiB); anything else deserves a look at the drift's shape |
+| `VmSize` ≫ RSS | glibc arena reservations (several 64 MiB `---p` tails) plus untouched guest RAM | ignore — use RSS/USS/PSS |
+| `FAILED (exit code N)` | that's the *launcher's* exit code — `chroot_vm` returns 0 after `krun_vmm_run()` regardless of the workload's status | check `guest-console.log` for the workload's real outcome |
+
+### Trusting a comparison
+
+Measured run-to-run bounds for identical commands (chroot_vm wraps,
+repeated five times): quiescent and pre-boot figures repeat within
+**±0.12%**, `framework_private_anon` within **±0.12%**, peak VmRSS and
+`guest_ram_rss` within **±0.7%**, thread and fd counts exactly. So:
+
+- deltas above ~1% are signal; below that, re-run the same command into
+  another `--results` directory and compare before believing them
+- for run-to-completion results, check `VmHWM` in `final-status.txt`:
+  when it equals the reported peak VmRSS, the true lifetime peak was
+  captured (the frozen checkpoint guarantees it on this tool's current
+  version)
+- the effective sampling grid is ~0.2–0.4 s per row (proc-walk cost per
+  iteration); plateaus are exact, sub-100 ms transients are covered by
+  the rise-chase but not point-by-point sampled
+
+### The density arithmetic
+
+Per **first** VM on a host, the launcher's RSS is everything at once;
+per **additional identical VM**, only the private parts repeat:
+
+```
+marginal cost per VM = framework_private_anon      (~0.5 MiB measured)
+                     + kernel_image_cow            (~16 MiB, krunfw payload)
+                     + guest_ram_rss               (guest-dependent: THE lever)
+                     + kernel-side KVM structs     (blind spot — not in /proc)
+```
+
+`file_backed_rss` (~8 MiB: libraries and the clean kernel image) is paid
+once per host and shared thereafter. Worked example from the chroot_vm
+measurements: each additional Fedora-rootfs VM of that shape costs
+~0.6 + 16 + ~160 ≈ **177 MiB private**, of which over 90% is the guest's
+own memory — which is why the biggest density levers are guest-side
+(kernel config, RAM sizing, ballooning), not VMM-side.
+
 ### Measuring the library alone
 
 `framework_private_anon` isolates the library's per-instance cost at run
