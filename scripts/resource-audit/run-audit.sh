@@ -2,11 +2,10 @@
 #
 # Runtime resource-usage audit for libkrun guests.
 #
-# For every test in the matrix (tests.conf) this script boots a real microVM
-# through the installed libkrun/libkrunfw/libkrun_init, waits for the guest
-# workload to report readiness, samples /proc/<harness-pid> for a while, and
-# writes per-test summaries plus a run-level comparison table. --wrap runs
-# an arbitrary VM launcher through the same measurement pipeline.
+# Runs any VM launcher (the COMMAND and its arguments) under the full
+# measurement pipeline: console captured, /proc/<pid> sampled from outside,
+# and the article-style reports (summary, annotated memory map, categories,
+# charts) written to the results directory.
 #
 # Methodology modeled on QEMU's "resource audit" article (section
 # "Analyzing Runtime Resource Usage"):
@@ -20,36 +19,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CC="${KRUN_AUDIT_CC:-cc}"
 PREFIX="${KRUN_AUDIT_PREFIX:-/usr/local}"
 LIBDIR="$PREFIX/lib64"
-INCLUDEDIR="$PREFIX/include"
 
-HARNESS="$SCRIPT_DIR/build/krun-harness"
-PAUSE="$SCRIPT_DIR/build/pause"
-BLK_SETUP="$SCRIPT_DIR/build/blk-setup"
 LABEL_SHIM="$SCRIPT_DIR/build/mmap-label.so"
 PHASE_HOOK="$SCRIPT_DIR/build/phase-hook.so"
 VMA_PROBE="$SCRIPT_DIR/build/vma-probe"
 CLK_TCK=$(getconf CLK_TCK)
 CSV_HEADER="elapsed_s,vmrss_kib,rss_anon_kib,rss_file_kib,pss_kib,uss_kib,anon_kib,pte_kib,threads,fds,cpu_user_s,cpu_sys_s,cpu_guest_s"
 
-CONFIG_FILE="$SCRIPT_DIR/tests.conf"
 RESULTS_DIR=""
 SETTLE=10
 DURATION=10
 INTERVAL=1
-LIST=0
-DRY_RUN=0
 REBUILD=0
-KEEP_GOING=0
-SELECTED=()
-WRAP=0
 WRAP_NAME=""
 WRAP_RAM_MIB=0
 WRAP_PHASE_PAUSE=10
 WRAP_LABELS=1
 WRAP_CMD=()
 
-# Measurement state shared by the matrix and --wrap paths; the phase helpers
-# below communicate through these.
+# Measurement state; the helpers below communicate through these.
 MEAS_LAUNCH_TIME=""
 RESULT=""
 REASON=""
@@ -57,52 +45,40 @@ READY_AFTER=""
 READY_FROM=""
 PHASE_SEEN=0
 
-DEFAULT_APPEND_CMDLINE=""
-PAUSE_BUILD_CMD=""
-HARNESS_BUILD_CMD=""
-BLK_SETUP_BUILD_CMD=""
 LABEL_SHIM_BUILD_CMD=""
 PHASE_HOOK_BUILD_CMD=""
 VMA_PROBE_BUILD_CMD=""
-STRACE_K_OK=0
-STRACE_KILL_OK=0
 CURRENT_PID=""
 CURRENT_PG=""
 COMPLETED=()
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [OPTIONS] [TEST ...]
-       $(basename "$0") --wrap [WRAP-OPTIONS] -- COMMAND [ARGS...]
+Usage: $(basename "$0") [OPTIONS] COMMAND [ARGS...]
 
-Runs the libkrun resource-audit test matrix (default: all tests in it), or
-wraps an arbitrary VM launcher in the same measurement pipeline.
-
-Wrap options (--wrap mode; the command after -- runs from your cwd with the
-audit's environment, its console captured, /proc/<pid> sampled, and the same
-reports generated as for matrix tests):
-  --wrap            measure the COMMAND after -- instead of the matrix
-  --name NAME       result directory name (default: basename of COMMAND)
-  --ram-mib N       guest RAM size for exact guest-RAM labeling; without it
-                    the multi-region identification applies (0 = unknown)
-  --phase-pause S   seconds to hold a libkrun launcher at krun_vmm_run()
-                    for pre-boot sampling via the phase-hook interposer
-                    (default: 10)
-  --no-labels       do not LD_PRELOAD the mmap-label shim (the phase hook
-                    stays: it is inert without KRUN_AUDIT_PHASE_PAUSE)
+Measures COMMAND (a VM launcher or any process) from outside: console
+captured, /proc/<pid> sampled, article-style reports written to the
+results directory.
 
 Options:
-  --config FILE     test matrix to use (default: tests.conf next to this script)
-  --results DIR     output directory (default: results/<timestamp> next to it)
-  --settle SECS     max wait for guest readiness (default: 10)
-  --duration SECS   sampling duration per test (default: 10)
-  --interval SECS   sampling interval in seconds (default: 1)
-  --list            list the tests defined in the matrix and exit
-  --dry-run         print the harness command line of each test without
-                    running it (per-test artifacts are still assembled)
-  --rebuild         rebuild the harness and workload even if up to date
-  --keep-going      continue after failed tests (default: abort)
-  -h, --help        show this help
+  --name NAME        test name for outputs (default: COMMAND basename)
+  --ram-mib N        guest RAM in MiB for exact guest-RAM matching (optional;
+                     without it the multi-region method applies)
+  --phase-pause S    seconds the phase hook holds libkrun launchers at
+                     krun_vmm_run() (default 10)
+  --settle S         max wait for the readiness marker (default 10)
+  --duration S       sampling duration once ready (default 10)
+  --interval S       sampling interval in seconds (default 1)
+  --results DIR      output directory (default results/<timestamp>)
+  --no-labels        don't preload the mmap/malloc label shim
+  --rebuild          rebuild the shims even if up to date
+  -h, --help         show this help
+
+The first non-option argument starts COMMAND; everything after it belongs
+to the command and is passed through untouched (so sh -c '...' and other
+dash-args work). A literal -- immediately before COMMAND is also accepted
+and skipped, as is a leading --wrap (both for compatibility with earlier
+invocations). A command that itself starts with a dash needs the -- form.
 
 Environment:
   KRUN_AUDIT_CC             C compiler (default: cc)
@@ -112,8 +88,6 @@ Environment:
                             the prefix libdir — put a directory holding an
                             alternative libkrunfw.so.5 here to audit a
                             different guest kernel build
-  KRUN_AUDIT_LABEL_MMAP     set to 1 to preload the mmap/malloc label shim
-                            for every matrix test (same as label_mmap=1)
   KRUN_AUDIT_MALLOC_LABEL_KIB
                             malloc-labeling threshold in KiB (default 128),
                             read by the shim itself
@@ -197,34 +171,6 @@ signed_kib() { # signed_kib DELTA — "+N" or "-N", never the "+-N" a bare prefi
 build_binaries() {
     mkdir -p "$SCRIPT_DIR/build"
 
-    if [[ ! -f "$PAUSE" || "$SCRIPT_DIR/pause.c" -nt "$PAUSE" || $REBUILD -eq 1 ]]; then
-        # Static, so the nullfs guest needs no libraries of its own.
-        if "$CC" -O2 -static -o "$PAUSE" "$SCRIPT_DIR/pause.c" 2>/dev/null; then
-            PAUSE_BUILD_CMD="$CC -O2 -static pause.c -o build/pause"
-        elif "$CC" -O2 -static-pie -o "$PAUSE" "$SCRIPT_DIR/pause.c" 2>/dev/null; then
-            PAUSE_BUILD_CMD="$CC -O2 -static-pie pause.c -o build/pause (static-pie fallback)"
-        else
-            "$CC" -O2 -o "$PAUSE" "$SCRIPT_DIR/pause.c"
-            PAUSE_BUILD_CMD="$CC -O2 pause.c -o build/pause (dynamic fallback — guest would need libc)"
-        fi
-    fi
-
-    if [[ ! -f "$HARNESS" || "$SCRIPT_DIR/harness.c" -nt "$HARNESS" || $REBUILD -eq 1 ]]; then
-        # -Wl,-rpath covers the libraries linked here; libkrunfw.so.5 is
-        # dlopened by soname at payload-load time, so LD_LIBRARY_PATH (set at
-        # launch) is what resolves it.
-        "$CC" -O2 -I"$INCLUDEDIR" "$SCRIPT_DIR/harness.c" -o "$HARNESS" \
-            -L"$LIBDIR" -lkrun -lkrun_init -Wl,-rpath,"$LIBDIR"
-        HARNESS_BUILD_CMD="$CC -O2 -I$INCLUDEDIR harness.c -o build/krun-harness -L$LIBDIR -lkrun -lkrun_init -Wl,-rpath,$LIBDIR"
-    fi
-
-    if [[ ! -f "$BLK_SETUP" || "$SCRIPT_DIR/blk-setup.c" -nt "$BLK_SETUP" || $REBUILD -eq 1 ]]; then
-        # Static, like pause: the realistic-matrix rootfs it runs in is the
-        # only thing the guest needs.
-        "$CC" -O2 -static -o "$BLK_SETUP" "$SCRIPT_DIR/blk-setup.c"
-        BLK_SETUP_BUILD_CMD="$CC -O2 -static blk-setup.c -o build/blk-setup"
-    fi
-
     if [[ ! -f "$LABEL_SHIM" || "$SCRIPT_DIR/mmap-label.c" -nt "$LABEL_SHIM" || $REBUILD -eq 1 ]]; then
         "$CC" -O2 -shared -fPIC -o "$LABEL_SHIM" "$SCRIPT_DIR/mmap-label.c" -ldl
         LABEL_SHIM_BUILD_CMD="$CC -O2 -shared -fPIC -o build/mmap-label.so mmap-label.c -ldl"
@@ -238,17 +184,6 @@ build_binaries() {
     if [[ ! -f "$VMA_PROBE" || "$SCRIPT_DIR/vma-probe.c" -nt "$VMA_PROBE" || $REBUILD -eq 1 ]]; then
         "$CC" -O2 -o "$VMA_PROBE" "$SCRIPT_DIR/vma-probe.c"
         VMA_PROBE_BUILD_CMD="$CC -O2 -o build/vma-probe vma-probe.c"
-    fi
-
-    # Not every strace build knows -k (syscall callstacks) or
-    # --kill-on-exit; probe once.
-    if command -v strace >/dev/null 2>&1; then
-        if strace -k -e trace=none true >/dev/null 2>&1; then
-            STRACE_K_OK=1
-        fi
-        if strace --kill-on-exit -e trace=none true >/dev/null 2>&1; then
-            STRACE_KILL_OK=1
-        fi
     fi
 }
 
@@ -351,11 +286,8 @@ write_libs_txt() { # write_libs_txt BINARY MAPS_FILE SUBJECT DIR [LD_PATH]
     } > "$dir/libs.txt"
 }
 
-take_final_snapshot() { # take_final_snapshot PID TEST_DIR [BINARY]
-    local pid=$1 dir=$2 binary=${3:-$HARNESS}
-    local subject="the harness"
-
-    [[ $# -ge 3 ]] && subject="the wrapped launcher"
+take_final_snapshot() { # take_final_snapshot PID TEST_DIR BINARY LD_PATH
+    local pid=$1 dir=$2 binary=$3 ld_path=$4
 
     cp "/proc/$pid/status" "$dir/final-status.txt" 2>/dev/null || true
     cp "/proc/$pid/smaps" "$dir/final-smaps.txt" 2>/dev/null || true
@@ -365,7 +297,7 @@ take_final_snapshot() { # take_final_snapshot PID TEST_DIR [BINARY]
 
     capture_proc_listings "$pid" "$dir"
 
-    write_libs_txt "$binary" "$dir/final-maps.txt" "$subject" "$dir" "${ld_path:-$LIBDIR}"
+    write_libs_txt "$binary" "$dir/final-maps.txt" "the wrapped launcher" "$dir" "$ld_path"
 }
 
 classify_fds() { # classify_fds FDS_FILE — "total=N, class=cnt, ..." summary
@@ -400,8 +332,8 @@ write_summary() { # write_summary TEST_DIR NAME CONFIG_LABEL RAM_MIB RESULT_LINE
     local io="$test_dir/final-io.txt"
     local parsed="$test_dir/parsed-smaps.tsv"
 
-    # Pre-boot phase (harness --pause-before-run): end-of-phase counters come
-    # from the last samples-preboot.csv row.
+    # Pre-boot phase (the phase-hook shim holding krun_vmm_run()):
+    # end-of-phase counters come from the last samples-preboot.csv row.
     local have_preboot=0
     local pb_vmrss=0 pb_rssan=0 pb_rssfile=0 pb_pss=0 pb_uss=0 pb_anon=0
     local pb_pte=0 pb_threads=0 pb_fds=0 pb_samples=0 pb_span=0
@@ -418,7 +350,7 @@ write_summary() { # write_summary TEST_DIR NAME CONFIG_LABEL RAM_MIB RESULT_LINE
     fi
 
     if [[ -f "$test_dir/final-smaps.txt" ]]; then
-        awk -v ram_kib=$((ram_mib * 1024)) -v harness="krun-harness" \
+        awk -v ram_kib=$((ram_mib * 1024)) -v launcher="$(basename "${WRAP_CMD[0]}")" \
             -f "$SCRIPT_DIR/parse-smaps.awk" "$test_dir/final-smaps.txt" > "$parsed"
     else
         : > "$parsed"
@@ -654,14 +586,14 @@ write_run_summary() {
         echo "Memory values in KiB, CPU in seconds. Per-test details in <test>/summary.txt,"
         echo "run metadata in meta.txt, raw samples in <test>/samples.csv."
         echo
-        echo "| test | vcpus | ram | transport | payload | root | devices | RSS | RssAnon | USS | PSS | guest_ram_rss | vmm_private_anon | VmPTE | threads | fds | cpu_user_s | cpu_sys_s | cpu_guest_s | result |"
-        echo "|------|-------|-----|-----------|---------|------|---------|-----|---------|-----|-----|---------------|------------------|-------|---------|-----|------------|------------|--------------|--------|"
+        echo "| test | ram | RSS | RssAnon | USS | PSS | guest_ram_rss | vmm_private_anon | VmPTE | threads | fds | cpu_user_s | cpu_sys_s | cpu_guest_s | result |"
+        echo "|------|-----|-----|---------|-----|-----|---------------|------------------|-------|---------|-----|------------|------------|--------------|--------|"
         local name m
         for name in "${COMPLETED[@]}"; do
             m="$RESULTS_DIR/$name/metrics.txt"
             if [[ -f "$m" ]]; then
                 awk -F= -v t="$name" '
-                    /^(vcpus|ram_mib|transport|payload|root|devices|vmrss_kib|rss_anon_kib|uss_kib|pss_kib|guest_ram_rss_kib|vmm_private_anon_kib|vmpte_kib|threads|fds|cpu_user_s|cpu_sys_s|cpu_guest_s|result)=/ {
+                    /^(ram_mib|vmrss_kib|rss_anon_kib|uss_kib|pss_kib|guest_ram_rss_kib|vmm_private_anon_kib|vmpte_kib|threads|fds|cpu_user_s|cpu_sys_s|cpu_guest_s|result)=/ {
                         v[$1] = $2
                     }
                     function val(k) {
@@ -669,14 +601,14 @@ write_run_summary() {
                         return "-"
                     }
                     END {
-                        printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
-                            t, val("vcpus"), val("ram_mib"), val("transport"), val("payload"), val("root"), val("devices"), \
+                        printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
+                            t, val("ram_mib"), \
                             val("vmrss_kib"), val("rss_anon_kib"), val("uss_kib"), val("pss_kib"), val("guest_ram_rss_kib"), \
                             val("vmm_private_anon_kib"), val("vmpte_kib"), val("threads"), val("fds"), \
                             val("cpu_user_s"), val("cpu_sys_s"), val("cpu_guest_s"), val("result")
                     }' "$m"
             else
-                echo "| $name | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | not run |"
+                echo "| $name | - | - | - | - | - | - | - | - | - | - | - | - | - | not run |"
             fi
         done
     } > "$out"
@@ -721,16 +653,8 @@ write_meta() {
         echo "libkrunfw (dlopened by soname libkrunfw.so.5): $(readlink -f "$LIBDIR/libkrunfw.so.5")"
         echo "libkrunfw resolution: LD_LIBRARY_PATH lists KRUN_AUDIT_EXTRA_LD_PATH entries"
         echo "  first, then $LIBDIR — an alternative libkrunfw.so.5 build placed earlier wins."
-        echo "harness build: ${HARNESS_BUILD_CMD:-cached from previous run}"
-        echo "pause build: ${PAUSE_BUILD_CMD:-cached from previous run}"
-        echo "blk-setup build: ${BLK_SETUP_BUILD_CMD:-cached from previous run}"
         echo "mmap-label shim: ${LABEL_SHIM_BUILD_CMD:-cached from previous run}"
         echo "phase-hook shim: ${PHASE_HOOK_BUILD_CMD:-cached from previous run}"
-        if command -v strace >/dev/null 2>&1; then
-            echo "strace: $(command -v strace) (callstacks: $([[ $STRACE_K_OK -eq 1 ]] && echo yes || echo no))"
-        else
-            echo "strace: not installed"
-        fi
         echo "settle=${SETTLE}s duration=${DURATION}s interval=${INTERVAL}s"
         echo "CONFIG_ANON_VMA_NAME: $anon_labels ($anon_source) — glibc's"
         echo "  GLIBC_TUNABLES=glibc.mem.decorate_maps=1 labels and the label_mmap shim both"
@@ -740,73 +664,7 @@ write_meta() {
     } > "$RESULTS_DIR/meta.txt"
 }
 
-# ----- shared measurement core (matrix and --wrap paths) -----
-
-preboot_phase() { # preboot_phase MODE VM_PID PID TEST_DIR CONSOLE SETTLE INTERVAL PHASE_SECS
-    # Wait for the VMM-built marker, sample the pause window, snapshot.
-    # MODE "matrix" fails the test when the marker is missing or the process
-    # died; MODE "wrap" just skips the phase — launchers that do not call
-    # krun_vmm_run() through the PLT never emit it.
-    local mode=$1 vm_pid=$2 pid=$3 dir=$4 console=$5 settle=$6 interval=$7 phase=$8
-
-    PHASE_SEEN=0
-    [[ $phase -gt 0 ]] || return 0
-    while :; do
-        if grep -aFq "AUDIT_PHASE_VMM_BUILT" "$console" 2>/dev/null; then
-            PHASE_SEEN=1
-            break
-        fi
-        if ! proc_alive "$vm_pid" || ! proc_alive "$pid"; then
-            if [[ $mode == matrix ]]; then
-                RESULT="FAILED"
-                REASON="harness exited before the VMM-built marker (see guest-console.log)"
-            fi
-            return 0
-        fi
-        if time_up "$MEAS_LAUNCH_TIME" "$settle"; then
-            if [[ $mode == matrix ]]; then
-                RESULT="FAILED"
-                REASON="VMM-built marker not found within ${settle}s (see guest-console.log)"
-            fi
-            return 0
-        fi
-        sleep 0.2
-    done
-    if [[ $mode == matrix && "$RESULT" != "OK" ]]; then
-        return 0
-    fi
-
-    # The launcher sleeps PHASE_SECS from the marker; keep a 1s safety margin
-    # because marker detection lags and a libkrun guest reaches readiness
-    # within ~0.2s of the sleep ending — sampling into the guest phase would
-    # corrupt the split.
-    local preboot_csv="$dir/samples-preboot.csv"
-    echo "$CSV_HEADER" > "$preboot_csv"
-    local preboot_start=$EPOCHREALTIME
-    local preboot_n=$(( (phase - 1) / interval ))
-    if (( preboot_n < 1 )); then preboot_n=1; fi
-    local pi
-    for ((pi = 0; pi < preboot_n; pi++)); do
-        if ! sample_once "$vm_pid" "$preboot_csv" "$preboot_start"; then
-            if [[ $mode == matrix ]]; then
-                RESULT="FAILED"
-                REASON="harness exited during pre-boot sampling"
-            fi
-            return 0
-        fi
-        if (( pi < preboot_n - 1 )); then
-            sleep "$interval"
-        fi
-    done
-    if proc_alive "$vm_pid"; then
-        cat "/proc/$vm_pid/status" > "$dir/preboot-status.txt" 2>/dev/null || true
-        cat "/proc/$vm_pid/smaps" > "$dir/preboot-smaps.txt" 2>/dev/null || true
-        cat "/proc/$vm_pid/maps" > "$dir/preboot-maps.txt" 2>/dev/null || true
-        cat "/proc/$vm_pid/io" > "$dir/preboot-io.txt" 2>/dev/null || true
-    fi
-    # the guest only starts executing when the pause window closes
-    READY_FROM=$EPOCHREALTIME
-}
+# ----- measurement core -----
 
 sample_window() { # sample_window VM_PID CSV START COUNT INTERVAL DEATH_REASON
     local vm_pid=$1 csv=$2 start=$3 n=$4 interval=$5 death=$6 i
@@ -849,260 +707,6 @@ teardown_launcher() { # teardown_launcher PID VM_PID PG — TERM, then KILL, the
     wait "$pid" 2>/dev/null || true
     CURRENT_PID=""
     CURRENT_PG=""
-}
-
-run_test() { # run_test NAME — returns nonzero if the test failed
-    local name=$1
-    local func="test_$name"
-    local test_dir="$RESULTS_DIR/$name"
-
-    # Matrix defaults; the test function overrides what it needs.
-    local vcpus=1 ram_mib=256 transport=mmio payload=krunfw
-    local kernel="" kernel_format="" initrd="" cmdline="" firmware_path=""
-    local append_cmdline="$DEFAULT_APPEND_CMDLINE"
-    local root_mode=nullfs root_dir=""
-    local workload="/pause"
-    local workload_args=()
-    local embeds=()
-    local devices="console"
-    local blk_img="" blk_format="raw" net_socket=""
-    local log_path=""
-    local ready_marker="AUDIT_GUEST_READY"
-    local settle=$SETTLE duration=$DURATION interval=$INTERVAL
-    local strace=0 label_mmap=0 pause_before_run=0
-    local -a extra_env=()
-
-    mkdir -p "$test_dir"
-    local TEST_DIR="$test_dir"
-    "$func"
-
-    if [[ ${KRUN_AUDIT_LABEL_MMAP:-0} == 1 ]]; then
-        label_mmap=1
-    fi
-
-    [[ "$vcpus" =~ ^[0-9]+$ ]] || die "test $name: vcpus='$vcpus' is not a number"
-    [[ "$ram_mib" =~ ^[0-9]+$ ]] || die "test $name: ram_mib='$ram_mib' is not a number"
-    [[ "$pause_before_run" =~ ^[0-9]+$ ]] || die "test $name: pause_before_run='$pause_before_run' is not a number"
-
-    # In nullfs mode the audit workload is mapped in from the host, read-only,
-    # unless the test embeds its own binary at the workload path.
-    if [[ "$payload" != "firmware" && "$root_mode" == "nullfs" ]]; then
-        local covered=0 e
-        for e in "${embeds[@]}"; do
-            if [[ "${e##*:}" == "$workload" ]]; then
-                covered=1
-            fi
-        done
-        if [[ $covered -eq 0 ]]; then
-            embeds+=("$PAUSE:$workload")
-        fi
-    fi
-
-    local -a args=(
-        --vcpus="$vcpus"
-        --ram-mib="$ram_mib"
-        --transport="$transport"
-        --payload="$payload"
-        --root-mode="$root_mode"
-        --devices="$devices"
-        --workload="$workload"
-    )
-    if [[ -n "$kernel" ]]; then args+=(--kernel="$kernel"); fi
-    if [[ -n "$kernel_format" ]]; then args+=(--kernel-format="$kernel_format"); fi
-    if [[ -n "$initrd" ]]; then args+=(--initrd="$initrd"); fi
-    if [[ -n "$cmdline" ]]; then args+=(--cmdline="$cmdline"); fi
-    if [[ -n "$firmware_path" ]]; then args+=(--firmware="$firmware_path"); fi
-    if [[ -n "$append_cmdline" ]]; then args+=(--append-cmdline="$append_cmdline"); fi
-    if [[ -n "$root_dir" ]]; then args+=(--root-dir="$root_dir"); fi
-    if [[ -n "$blk_img" ]]; then
-        args+=(--blk-img="$blk_img")
-        args+=(--blk-format="$blk_format")
-    fi
-    if [[ -n "$net_socket" ]]; then args+=(--net-socket="$net_socket"); fi
-    if [[ -n "$log_path" ]]; then args+=(--log="$log_path"); fi
-    if [[ "$pause_before_run" -gt 0 ]]; then args+=(--pause-before-run="$pause_before_run"); fi
-    local e
-    for e in "${embeds[@]}"; do
-        args+=(--embed="$e")
-    done
-    if [[ ${#workload_args[@]} -gt 0 ]]; then
-        args+=(-- "${workload_args[@]}")
-    fi
-
-    # Fail fast on obviously broken configurations.
-    if [[ -n "$kernel" && ! -f "$kernel" ]]; then die "test $name: kernel not found: $kernel"; fi
-    if [[ -n "$firmware_path" && ! -f "$firmware_path" ]]; then die "test $name: firmware not found: $firmware_path"; fi
-    if [[ -n "$initrd" && ! -f "$initrd" ]]; then die "test $name: initrd not found: $initrd"; fi
-    if [[ "$root_mode" == "dir" && ! -d "$root_dir" ]]; then die "test $name: root dir not found: $root_dir"; fi
-    if [[ -n "$blk_img" && ! -f "$blk_img" ]]; then die "test $name: blk image not found: $blk_img"; fi
-    if [[ $DRY_RUN -eq 0 && "$payload" != "firmware" && "$root_mode" == "nullfs" && ! -f "$PAUSE" ]]; then
-        die "test $name: workload binary $PAUSE missing (build skipped?)"
-    fi
-
-    if [[ $DRY_RUN -eq 1 ]]; then
-        printf '%s: would run: ' "$name"
-        printf '%q ' "$HARNESS" "${args[@]}"
-        echo
-        return 0
-    fi
-
-    local console_log="$test_dir/guest-console.log"
-    # KRUN_AUDIT_EXTRA_LD_PATH entries come first so an alternative
-    # libkrunfw.so.5 build wins over the installed one.
-    local ld_path="${KRUN_AUDIT_EXTRA_LD_PATH:+$KRUN_AUDIT_EXTRA_LD_PATH:}$LIBDIR"
-
-    local kv
-    {
-        echo "# environment"
-        echo "LD_LIBRARY_PATH=$ld_path"
-        echo "GLIBC_TUNABLES=glibc.mem.decorate_maps=1"
-        if [[ $label_mmap -eq 1 ]]; then
-            echo "LD_PRELOAD=$LABEL_SHIM"
-        fi
-        for kv in "${extra_env[@]}"; do echo "$kv"; done
-        echo "# knobs"
-        echo "strace=$strace"
-        echo "label_mmap=$label_mmap"
-        echo "# launched with cwd $test_dir"
-        printf 'cmdline:'
-        printf ' %q' "$HARNESS" "${args[@]}"
-        echo
-    } > "$test_dir/cmd.txt"
-
-    local -a env_cmd=(env LD_LIBRARY_PATH="$ld_path" GLIBC_TUNABLES=glibc.mem.decorate_maps=1)
-    if [[ $label_mmap -eq 1 ]]; then
-        env_cmd+=("LD_PRELOAD=$LABEL_SHIM")
-    fi
-    env_cmd+=("${extra_env[@]}")
-    env_cmd+=("$HARNESS" "${args[@]}")
-
-    # strace runs as the direct parent, so ptrace_scope is not an issue.
-    # strace merely detaches on SIGTERM, so either ask it to kill its tracees
-    # (--kill-on-exit) or put the whole tree in its own process group.
-    local -a launch_cmd=("${env_cmd[@]}")
-    local launcher_pg=""
-    if [[ $strace -eq 1 ]]; then
-        if ! command -v strace >/dev/null 2>&1; then
-            die "test $name: strace=1 but strace is not installed"
-        fi
-        launch_cmd=(strace -f)
-        if [[ $STRACE_K_OK -eq 1 ]]; then
-            launch_cmd+=(-k)
-        else
-            echo "  note: this strace does not support -k; mmap callstacks disabled"
-        fi
-        launch_cmd+=(-e trace=mmap,mprotect,munmap,open,openat,openat2,prctl -o "$test_dir/strace.log")
-        if [[ $STRACE_KILL_OK -eq 1 ]]; then
-            launch_cmd+=(--kill-on-exit)
-        else
-            launch_cmd=(setsid "${launch_cmd[@]}")
-            launcher_pg=1
-        fi
-        launch_cmd+=("${env_cmd[@]}")
-    fi
-
-    (
-        cd "$test_dir"
-        exec "${launch_cmd[@]}" </dev/null >"$console_log" 2>&1
-    ) &
-    local pid=$!
-    CURRENT_PID=$pid
-    CURRENT_PG=""
-    if [[ -n "$launcher_pg" ]]; then
-        CURRENT_PG=$pid
-    fi
-
-    # Under strace, $pid is the tracer; sampling must target the VM process.
-    # strace's only child is env, which execs the harness without forking, so
-    # the first child pid is the harness's own.
-    local vm_pid=$pid
-    if [[ $strace -eq 1 ]]; then
-        local tries=0 child=""
-        while (( tries < 20 )) && [[ -z "$child" ]]; do
-            child=$(awk '{ print $1 }' "/proc/$pid/task/$pid/children" 2>/dev/null) || child=""
-            if [[ -z "$child" ]]; then
-                sleep 0.1
-                tries=$((tries + 1))
-            fi
-        done
-        vm_pid=${child:-$pid}
-    fi
-
-    MEAS_LAUNCH_TIME=$EPOCHREALTIME
-    RESULT="OK"
-    REASON=""
-    READY_AFTER=""
-    READY_FROM=$MEAS_LAUNCH_TIME
-
-    # Phase 1 (harness --pause-before-run): VMM built, guest not executing.
-    preboot_phase matrix "$vm_pid" "$pid" "$test_dir" "$console_log" \
-        "$settle" "$interval" "$pause_before_run"
-
-    if [[ -n "$ready_marker" ]]; then
-        while :; do
-            if grep -aFq "$ready_marker" "$console_log" 2>/dev/null; then
-                READY_AFTER=$(elapsed_between "$MEAS_LAUNCH_TIME")
-                break
-            fi
-            if ! proc_alive "$vm_pid" || ! proc_alive "$pid"; then
-                RESULT="FAILED"
-                REASON="harness exited before the readiness marker (see guest-console.log)"
-                break
-            fi
-            if time_up "$READY_FROM" "$settle"; then
-                RESULT="FAILED"
-                REASON="readiness marker not found within ${settle}s (see guest-console.log)"
-                break
-            fi
-            sleep 0.2
-        done
-    else
-        # Firmware payloads boot themselves; there is no marker to wait for.
-        sleep "$settle"
-        if proc_alive "$vm_pid"; then
-            READY_AFTER="n/a"
-        else
-            RESULT="FAILED"
-            REASON="harness exited during the settle period (see guest-console.log)"
-        fi
-    fi
-
-    local samples="$test_dir/samples.csv"
-    echo "$CSV_HEADER" > "$samples"
-
-    if [[ "$RESULT" == "OK" ]]; then
-        sample_window "$vm_pid" "$samples" "$EPOCHREALTIME" \
-            $(( duration / interval )) "$interval" "harness exited during sampling"
-    fi
-
-    if proc_alive "$vm_pid"; then
-        take_final_snapshot "$vm_pid" "$test_dir"
-    fi
-
-    teardown_launcher "$pid" "$vm_pid" "$launcher_pg"
-
-    local result_line
-    if [[ "$RESULT" == "OK" ]]; then
-        if [[ "$READY_AFTER" == "n/a" ]]; then
-            result_line="OK (no readiness marker for this payload; settle wait completed)"
-        else
-            result_line="OK (guest ready after ${READY_AFTER}s)"
-        fi
-    else
-        result_line="FAILED ($REASON)"
-    fi
-    write_summary "$test_dir" "$name" \
-        "vcpus=$vcpus ram_mib=$ram_mib transport=$transport payload=$payload root=$root_mode devices=$devices" \
-        "$ram_mib" "$result_line" "$duration" "$interval" \
-        "vcpus=$vcpus" "ram_mib=$ram_mib" "transport=$transport" "payload=$payload" \
-        "root=$root_mode" "devices=$devices"
-
-    if [[ "$RESULT" == "OK" ]]; then
-        echo "  OK (guest ready after ${READY_AFTER}s): $test_dir/summary.txt"
-        return 0
-    fi
-    echo "  FAILED: $REASON"
-    return 1
 }
 
 wrap_capture_step() { # one insurance capture; runs in run_wrap's scope
@@ -1376,7 +980,7 @@ run_wrap() { # run_wrap — measure the wrapped launcher; returns nonzero on fai
         sample_window "$vm_pid" "$samples" "$run_start" \
             $(( DURATION / INTERVAL )) "$INTERVAL" "launcher exited during sampling"
         if proc_alive "$vm_pid"; then
-            take_final_snapshot "$vm_pid" "$test_dir" "${WRAP_CMD[0]}"
+            take_final_snapshot "$vm_pid" "$test_dir" "${WRAP_CMD[0]}" "$ld_path"
         else
             RESULT="FAILED"
             REASON="launcher exited during sampling"
@@ -1391,7 +995,7 @@ run_wrap() { # run_wrap — measure the wrapped launcher; returns nonzero on fai
         # Neither marker nor exit within the budget: treat like a marker-less
         # payload — the RUN loop already sampled the whole window.
         if proc_alive "$vm_pid"; then
-            take_final_snapshot "$vm_pid" "$test_dir" "${WRAP_CMD[0]}"
+            take_final_snapshot "$vm_pid" "$test_dir" "${WRAP_CMD[0]}" "$ld_path"
         fi
         teardown_launcher "$pid" "$vm_pid" ""
         result_line="OK (no readiness marker; settle wait completed)"
@@ -1400,7 +1004,7 @@ run_wrap() { # run_wrap — measure the wrapped launcher; returns nonzero on fai
     rm -f "$test_dir"/cp-*.txt "$test_dir"/best-*.txt
 
     local config_label
-    config_label="wrap: ${WRAP_CMD[*]}"
+    config_label="${WRAP_CMD[*]}"
     if [[ $WRAP_RAM_MIB -gt 0 ]]; then
         config_label="$config_label (ram_mib=$WRAP_RAM_MIB)"
     fi
@@ -1411,48 +1015,46 @@ run_wrap() { # run_wrap — measure the wrapped launcher; returns nonzero on fai
         echo "  $result_line: $test_dir/summary.txt"
         return 0
     fi
-    echo "  FAILED: $(awk -v s="$result_line" 'BEGIN { sub(/^FAILED \(/, ""); sub(/\)$/, ""); print s }')"
+    echo "  FAILED: $(awk -v s="$result_line" 'BEGIN { sub(/^FAILED \(/, "", s); sub(/\)$/, "", s); print s }')"
     return 1
 }
 
 main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --config) CONFIG_FILE=$2; shift 2 ;;
-            --config=*) CONFIG_FILE=${1#*=}; shift ;;
-            --results) RESULTS_DIR=$2; shift 2 ;;
-            --results=*) RESULTS_DIR=${1#*=}; shift ;;
+            --name) WRAP_NAME=$2; shift 2 ;;
+            --name=*) WRAP_NAME=${1#*=}; shift ;;
+            --ram-mib) WRAP_RAM_MIB=$2; shift 2 ;;
+            --ram-mib=*) WRAP_RAM_MIB=${1#*=}; shift ;;
+            --phase-pause) WRAP_PHASE_PAUSE=$2; shift 2 ;;
+            --phase-pause=*) WRAP_PHASE_PAUSE=${1#*=}; shift ;;
             --settle) SETTLE=$2; shift 2 ;;
             --settle=*) SETTLE=${1#*=}; shift ;;
             --duration) DURATION=$2; shift 2 ;;
             --duration=*) DURATION=${1#*=}; shift ;;
             --interval) INTERVAL=$2; shift 2 ;;
             --interval=*) INTERVAL=${1#*=}; shift ;;
-            --list) LIST=1; shift ;;
-            --dry-run) DRY_RUN=1; shift ;;
+            --results) RESULTS_DIR=$2; shift 2 ;;
+            --results=*) RESULTS_DIR=${1#*=}; shift ;;
+            --no-labels) WRAP_LABELS=0; shift ;;
             --rebuild) REBUILD=1; shift ;;
-            --keep-going) KEEP_GOING=1; shift ;;
-            --wrap) WRAP=1; shift ;;
-            --name) [[ $WRAP -eq 1 ]] || die "--name is only valid with --wrap"; WRAP_NAME=$2; shift 2 ;;
-            --name=*) [[ $WRAP -eq 1 ]] || die "--name is only valid with --wrap"; WRAP_NAME=${1#*=}; shift ;;
-            --ram-mib) [[ $WRAP -eq 1 ]] || die "--ram-mib is only valid with --wrap"; WRAP_RAM_MIB=$2; shift 2 ;;
-            --ram-mib=*) [[ $WRAP -eq 1 ]] || die "--ram-mib is only valid with --wrap"; WRAP_RAM_MIB=${1#*=}; shift ;;
-            --phase-pause) [[ $WRAP -eq 1 ]] || die "--phase-pause is only valid with --wrap"; WRAP_PHASE_PAUSE=$2; shift 2 ;;
-            --phase-pause=*) [[ $WRAP -eq 1 ]] || die "--phase-pause is only valid with --wrap"; WRAP_PHASE_PAUSE=${1#*=}; shift ;;
-            --no-labels) [[ $WRAP -eq 1 ]] || die "--no-labels is only valid with --wrap"; WRAP_LABELS=0; shift ;;
+            # compatibility with earlier invocations
+            --wrap) shift ;;
             -h|--help) usage; return 0 ;;
             --)
+                # the command follows; everything after belongs to it
                 shift
-                if [[ $WRAP -eq 1 ]]; then
-                    WRAP_CMD=("$@")
-                else
-                    SELECTED+=("$@")
-                fi
+                WRAP_CMD=("$@")
                 break ;;
-            -*) echo "unknown option: $1" >&2; usage >&2; return 1 ;;
+            -*)
+                echo "unknown option: $1 (a command starting with a dash needs an explicit -- before it)" >&2
+                usage >&2
+                return 1 ;;
             *)
-                [[ $WRAP -eq 0 ]] || die "wrap mode: pass the command after -- (got '$1')"
-                SELECTED+=("$1"); shift ;;
+                # the first non-option argument starts the command; the rest
+                # of the line is passed through untouched
+                WRAP_CMD=("$@")
+                break ;;
         esac
     done
 
@@ -1461,96 +1063,30 @@ main() {
     [[ "$INTERVAL" =~ ^[0-9]+$ ]] || die "--interval must be an integer number of seconds"
     [[ "$INTERVAL" -ge 1 ]] || die "--interval must be at least 1 second"
 
-    if [[ $WRAP -eq 1 ]]; then
-        [[ $DRY_RUN -eq 0 ]] || die "--dry-run is not supported with --wrap"
-        [[ ${#WRAP_CMD[@]} -gt 0 ]] || die "wrap mode: pass the command after --"
-        [[ "$WRAP_RAM_MIB" =~ ^[0-9]+$ ]] || die "--ram-mib must be a number"
-        [[ "$WRAP_PHASE_PAUSE" =~ ^[0-9]+$ ]] || die "--phase-pause must be a number of seconds"
-        if [[ -z "$WRAP_NAME" ]]; then
-            WRAP_NAME=$(basename "${WRAP_CMD[0]}")
-        fi
-        # Reuse the test-name rules: the results subdir is the name.
-        [[ "$WRAP_NAME" != */* && "$WRAP_NAME" != *..* ]] || die "invalid --name '$WRAP_NAME'"
-
-        if [[ -z "$RESULTS_DIR" ]]; then
-            RESULTS_DIR="$SCRIPT_DIR/results/$(date +%Y%m%d-%H%M%S)"
-        fi
-        if [[ -e "$RESULTS_DIR" && -n "$(ls -A "$RESULTS_DIR" 2>/dev/null)" ]]; then
-            die "results directory $RESULTS_DIR exists and is not empty (use --results DIR)"
-        fi
-        mkdir -p "$RESULTS_DIR"
-        build_binaries
-        write_meta
-
-        echo "=== wrap: $WRAP_NAME ==="
-        COMPLETED+=("$WRAP_NAME")
-        local wrap_failed=0
-        if ! run_wrap; then
-            wrap_failed=1
-        fi
-        write_run_summary
-        if [[ $wrap_failed -ne 0 ]]; then
-            return 1
-        fi
-        echo "all tests passed"
-        return 0
+    [[ ${#WRAP_CMD[@]} -gt 0 ]] || die "no command given (pass it after the options)"
+    [[ "$WRAP_RAM_MIB" =~ ^[0-9]+$ ]] || die "--ram-mib must be a number"
+    [[ "$WRAP_PHASE_PAUSE" =~ ^[0-9]+$ ]] || die "--phase-pause must be a number of seconds"
+    if [[ -z "$WRAP_NAME" ]]; then
+        WRAP_NAME=$(basename "${WRAP_CMD[0]}")
     fi
-
-    [[ -f "$CONFIG_FILE" ]] || die "config file not found: $CONFIG_FILE"
-    # shellcheck source=tests.conf
-    source "$CONFIG_FILE"
-    DEFAULT_APPEND_CMDLINE="${COMMON_APPEND_CMDLINE:-}"
-
-    local all_tests
-    all_tests=$(declare -F | awk '$3 ~ /^test_/ { sub(/^test_/, "", $3); print $3 }')
-    [[ -n "$all_tests" ]] || die "no test_* functions found in $CONFIG_FILE"
-
-    if [[ $LIST -eq 1 ]]; then
-        printf '%s\n' "$all_tests"
-        return 0
-    fi
-
-    local -a selected=()
-    if [[ ${#SELECTED[@]} -eq 0 ]]; then
-        mapfile -t selected <<< "$all_tests"
-    else
-        local t
-        for t in "${SELECTED[@]}"; do
-            if ! printf '%s\n' "$all_tests" | grep -qx -- "$t"; then
-                die "unknown test '$t' (use --list)"
-            fi
-            selected+=("$t")
-        done
-    fi
+    [[ "$WRAP_NAME" != */* && "$WRAP_NAME" != *..* ]] || die "invalid --name '$WRAP_NAME'"
 
     if [[ -z "$RESULTS_DIR" ]]; then
         RESULTS_DIR="$SCRIPT_DIR/results/$(date +%Y%m%d-%H%M%S)"
     fi
-    if [[ $DRY_RUN -eq 0 && -e "$RESULTS_DIR" && -n "$(ls -A "$RESULTS_DIR" 2>/dev/null)" ]]; then
+    if [[ -e "$RESULTS_DIR" && -n "$(ls -A "$RESULTS_DIR" 2>/dev/null)" ]]; then
         die "results directory $RESULTS_DIR exists and is not empty (use --results DIR)"
     fi
     mkdir -p "$RESULTS_DIR"
-
-    # The build is mtime-cached and cheap; doing it in dry-run too keeps the
-    # per-test artifact assembly (e.g. cp of the workload) working.
     build_binaries
-    if [[ $DRY_RUN -eq 0 ]]; then
-        write_meta
+    write_meta
+
+    echo "=== measuring: $WRAP_NAME ==="
+    COMPLETED+=("$WRAP_NAME")
+    local failed=0
+    if ! run_wrap; then
+        failed=1
     fi
-
-    local failed=0 name
-    for name in "${selected[@]}"; do
-        echo "=== test: $name ==="
-        COMPLETED+=("$name")
-        if ! run_test "$name"; then
-            failed=1
-            if [[ $KEEP_GOING -eq 0 ]]; then
-                echo "test $name failed; stopping (use --keep-going to continue)" >&2
-                break
-            fi
-        fi
-    done
-
     write_run_summary
 
     if [[ $failed -ne 0 ]]; then
