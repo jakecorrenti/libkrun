@@ -16,7 +16,7 @@ from TEST_DIR and writes into TEST_DIR:
 
 --input-prefix/--output-prefix select the phase: the default (final-) is the
 end-of-run snapshot; preboot- addresses the VMM-built-before-guest snapshot
-taken for --pause-before-run tests. task-stats.txt and metrics.txt are shared
+taken while the phase hook holds the launcher. task-stats.txt and metrics.txt are shared
 between phases unless a prefixed copy exists.
 
 Annotations are inferred from what the kernel exposes: ELF sections for
@@ -36,6 +36,24 @@ import os
 import re
 import struct
 import sys
+
+# The measured launcher's basename (from cmd.txt's cmdline), used to classify
+# its own binary's mappings.
+LAUNCHER_FRAGMENT = ""
+
+
+def _load_launcher_fragment(test_dir):
+    global LAUNCHER_FRAGMENT
+    try:
+        with open(os.path.join(test_dir, "cmd.txt"), "r", errors="replace") as f:
+            for line in f:
+                if line.startswith("cmdline:"):
+                    tok = line[len("cmdline:"):].split()[0].strip("\"'")
+                    LAUNCHER_FRAGMENT = os.path.basename(tok)
+                    return
+    except (OSError, IndexError):
+        pass
+
 
 KiB = 1024
 ARENA_TOTAL_KIB = 64 * KiB  # glibc HEAP_MAX_SIZE
@@ -274,28 +292,34 @@ def mark_guest_ram(vmas, ram_kib):
     anon_rw = [v for v in vmas if is_anon(v) and v.perms.startswith("rw")]
     targets = []
     method = "largest-anon fallback"
-    for want, m in ((ram_kib, "exact-size match"),
-                    (ram_kib + GUEST_RAM_LOW_KIB, "merged-size match")):
-        targets = [v for v in anon_rw if v.size == want]
-        if targets:
-            method = m
-            break
+    if ram_kib > 0:
+        for want, m in ((ram_kib, "exact-size match"),
+                        (ram_kib + GUEST_RAM_LOW_KIB, "merged-size match")):
+            targets = [v for v in anon_rw if v.size == want]
+            if targets:
+                method = m
+                break
     if not targets:
         # Guests larger than the 32-bit PCI gap (3328 MiB) get their RAM
         # split into several mmaps (below-gap + above-4G), none of which
         # matches the RAM size exactly: claim every sizeable anonymous rw
         # region that is not a glibc decoration or a shim-labeled malloc.
         # (Arena reservations are ---p and excluded by the rw filter.)
+        # Self-qualifying, so it also applies when the RAM size is unknown.
         targets = [v for v in anon_rw if v.size >= GUEST_RAM_LOW_KIB
                    and not _is_allocator_label(v)]
         if targets:
             method = "multi-region"
-    if not targets and anon_rw:
+    # The size-referencing fallback is meaningless without a known size.
+    if not targets and ram_kib > 0 and anon_rw:
         targets = [max(anon_rw, key=lambda v: v.size)]
-    # The low-memory region below the kernel load address is guest RAM too;
-    # with per-mapping kernel labels the two RAM mmaps no longer merge.
-    # No-op for the multi-region method, which already claimed it.
-    if method != "multi-region" and ram_kib != GUEST_RAM_LOW_KIB:
+    if not targets:
+        method = "none"
+    if method in ("exact-size match", "merged-size match", "largest-anon fallback") \
+            and ram_kib != GUEST_RAM_LOW_KIB:
+        # The low-memory region below the kernel load address is guest RAM
+        # too; with per-mapping kernel labels the two RAM mmaps no longer
+        # merge. No-op for the multi-region method.
         targets += [v for v in anon_rw
                     if v.size == GUEST_RAM_LOW_KIB and v not in targets]
     for v in targets:
@@ -444,8 +468,8 @@ def _path_category(p):
         return "libkrun_init.so"
     if "libkrun.so" in p:
         return "libkrun.so"
-    if "krun-harness" in p:
-        return "harness"
+    if LAUNCHER_FRAGMENT and LAUNCHER_FRAGMENT in p:
+        return "launcher"
     if p.endswith(".so") or ".so." in p or "ld-linux" in p:
         return "system-libs"
     return "other-file"
@@ -719,7 +743,7 @@ def write_ro_rw(path, title, rows):
 def main():
     ap = argparse.ArgumentParser(
         description="Annotate a libkrun resource-audit memory snapshot.")
-    ap.add_argument("test_dir", help="per-test results directory")
+    ap.add_argument("test_dir", help="per-run results directory")
     ap.add_argument("--name", required=True, help="test name (output naming, titles)")
     ap.add_argument("--ram-mib", type=int, default=None,
                     help="guest RAM in MiB (default: ram_mib from metrics.txt)")
@@ -751,10 +775,9 @@ def main():
     ram_mib = args.ram_mib
     if ram_mib is None:
         ram_mib = int(parse_metrics(prefixed_or_shared("metrics.txt")).get("ram_mib", 0))
-    if ram_mib <= 0:
-        print("annotate-maps.py: guest RAM size unknown (--ram-mib)", file=sys.stderr)
-        return 1
+    # 0 = unknown: only the self-qualifying multi-region identification runs
 
+    _load_launcher_fragment(d)
     tasks = parse_task_stats(prefixed_or_shared("task-stats.txt"))
     status = parse_status(os.path.join(d, inp + "status.txt"))
 

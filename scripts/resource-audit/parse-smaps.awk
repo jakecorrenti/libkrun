@@ -1,6 +1,6 @@
 # parse-smaps.awk — turn a /proc/PID/smaps snapshot into resource-audit rows.
 #
-# Usage: awk -v ram_kib=N -v harness=FRAGMENT [-f parse-smaps.awk] FILE
+# Usage: awk -v ram_kib=N -v launcher=FRAGMENT [-f parse-smaps.awk FILE
 #
 # Emits tab-separated records (OFS is set to TAB):
 #   MAP      <size> <rss> <anon> <pss> <uss> <perms> <label>   (per mapping)
@@ -22,7 +22,7 @@
 #
 # Categories: guest-RAM, kvm (anon_inode:kvm-*), libkrun.so (includes
 # libkrun_init.so, the embedded guest init), libkrunfw.so, system-libs
-# (libc/ld and other .so files), harness, heap, stack, other-anon,
+# (libc/ld and other .so files), launcher, heap, stack, other-anon,
 # other-file.
 
 function unlabeled_anon(p) {
@@ -68,8 +68,8 @@ function category(i,    p) {
     if (p ~ /libkrun\.so/ || p ~ /libkrun_init\.so/) {
         return "libkrun.so"
     }
-    if (harness != "" && index(p, harness) > 0) {
-        return "harness"
+    if (launcher != "" && index(p, launcher) > 0) {
+        return "launcher"
     }
     if (p ~ /\.so(\.[0-9]+)*$/ || p ~ /\/ld-linux/) {
         return "system-libs"
@@ -150,7 +150,8 @@ END {
         }
         if (gram_n > 0) {
             method = "multi-region"
-        } else if (lg > 0) {
+        } else if (lg > 0 && ram_kib > 0) {
+            # size-referencing fallback: meaningless without a known size
             method = "largest-anon fallback"
             gram_n = 1
             gram_rss = m_rss[lg]
@@ -181,7 +182,7 @@ END {
     print "TOTAL", t_rss + 0, t_anon + 0, t_pss + 0, t_uss + 0, t_shared + 0
     print "GUESTRAM", method, gram_n + 0, gram_rss + 0, gram_anon + 0
 
-    split("guest-RAM kvm libkrun.so libkrunfw.so system-libs harness heap stack other-anon other-file", order, " ")
+    split("guest-RAM kvm libkrun.so libkrunfw.so system-libs launcher heap stack other-anon other-file", order, " ")
     for (j = 1; j <= 10; j++) {
         if (order[j] in c_rss || order[j] in c_anon) {
             print "ROLLUP", order[j], c_rss[order[j]] + 0, c_anon[order[j]] + 0
