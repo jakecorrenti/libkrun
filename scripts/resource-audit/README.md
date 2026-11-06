@@ -129,8 +129,11 @@ stdio redirected to `guest-console.log` and samples the process from outside.
 |------|---------|
 | `harness.c` | C VM launcher (payload / rootfs / devices / embed configuration) |
 | `pause.c` | static guest workload: print marker, sleep forever |
+| `blk-setup.c` | static guest workload for the blk test: mount ext4, write, idle |
 | `run-audit.sh` | driver: build, launch, readiness, sampling, reports |
 | `tests.conf` | the test matrix — edit this to add configurations |
+| `tests-full.conf` | maximal matrix: every axis, phased and labeled, plus strace |
+| `tests-realistic.conf` | realistic-guest matrix: chroot_vm model on a real rootfs |
 | `parse-smaps.awk` | smaps → per-mapping rows, guest-RAM ID, category rollup |
 | `annotate-maps.py` | verbose annotated memory map, category CSV, SVG charts |
 | `mmap-label.c` | LD_PRELOAD shim naming anonymous mmaps after their callers |

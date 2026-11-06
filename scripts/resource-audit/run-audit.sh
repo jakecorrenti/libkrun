@@ -112,6 +112,11 @@ Environment:
                             the prefix libdir — put a directory holding an
                             alternative libkrunfw.so.5 here to audit a
                             different guest kernel build
+  KRUN_AUDIT_LABEL_MMAP     set to 1 to preload the mmap/malloc label shim
+                            for every matrix test (same as label_mmap=1)
+  KRUN_AUDIT_MALLOC_LABEL_KIB
+                            malloc-labeling threshold in KiB (default 128),
+                            read by the shim itself
 EOF
 }
 
@@ -330,9 +335,27 @@ capture_proc_listings() { # capture_proc_listings PID DIR [PREFIX]
     done
 }
 
+write_libs_txt() { # write_libs_txt BINARY MAPS_FILE SUBJECT DIR [LD_PATH]
+    local binary=$1 maps=$2 subject=$3 dir=$4 lib
+
+    # ldd resolves the way the launcher itself did — wrapped commands have
+    # no rpath, so without the library path their libs report "not found".
+    {
+        LD_LIBRARY_PATH="${5:-$LIBDIR}" ldd "$binary" 2>/dev/null || true
+        echo
+        echo "krun libraries actually mapped by $subject (from $(basename "$maps")):"
+        awk '{ for (i = 6; i <= NF; i++) if ($i ~ /\/libkrun[^/]*\.so/) print $i }' "$maps" 2>/dev/null \
+            | sort -u | while read -r lib; do
+            printf '  %s -> %s\n' "$lib" "$(readlink -f "$lib")"
+        done
+    } > "$dir/libs.txt"
+}
+
 take_final_snapshot() { # take_final_snapshot PID TEST_DIR [BINARY]
     local pid=$1 dir=$2 binary=${3:-$HARNESS}
-    local lib
+    local subject="the harness"
+
+    [[ $# -ge 3 ]] && subject="the wrapped launcher"
 
     cp "/proc/$pid/status" "$dir/final-status.txt" 2>/dev/null || true
     cp "/proc/$pid/smaps" "$dir/final-smaps.txt" 2>/dev/null || true
@@ -342,15 +365,7 @@ take_final_snapshot() { # take_final_snapshot PID TEST_DIR [BINARY]
 
     capture_proc_listings "$pid" "$dir"
 
-    {
-        ldd "$binary" 2>/dev/null || true
-        echo
-        echo "krun libraries actually mapped by the harness (from final-maps.txt):"
-        awk '{ for (i = 6; i <= NF; i++) if ($i ~ /\/libkrun[^/]*\.so/) print $i }' "$dir/final-maps.txt" 2>/dev/null \
-            | sort -u | while read -r lib; do
-            printf '  %s -> %s\n' "$lib" "$(readlink -f "$lib")"
-        done
-    } > "$dir/libs.txt"
+    write_libs_txt "$binary" "$dir/final-maps.txt" "$subject" "$dir" "${ld_path:-$LIBDIR}"
 }
 
 classify_fds() { # classify_fds FDS_FILE — "total=N, class=cnt, ..." summary
@@ -1337,6 +1352,11 @@ run_wrap() { # run_wrap — measure the wrapped launcher; returns nonzero on fai
                     cp "$test_dir/best-$f.txt" "$test_dir/$f.txt"
                 fi
             done
+            # ldd needs only the binary and the promoted map, so the
+            # library report survives the process.
+            [[ -f "$test_dir/final-maps.txt" ]] && \
+                write_libs_txt "${WRAP_CMD[0]}" "$test_dir/final-maps.txt" \
+                    "the wrapped launcher" "$test_dir" "$ld_path"
             {
                 printf 'Note: final snapshot is the peak-RSS checkpoint during the run'
                 printf ' (VmRSS %s KiB at ~%ss, thread/fd listings captured near the peak)' \
