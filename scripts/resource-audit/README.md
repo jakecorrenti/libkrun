@@ -117,6 +117,7 @@ where `make` drops versioned `libkrunfw.so.5.x.y` files.
 | file | purpose |
 |------|---------|
 | `run-audit.sh` | the driver: launch, readiness, sampling, reports |
+| `run-audit-rs/` | Rust port of the driver (behavioral duplicate of `run-audit.sh`) |
 | `phase-hook.c` | LD_PRELOAD shim holding wrapped launchers at krun_vmm_run() |
 | `mmap-label.c` | LD_PRELOAD shim naming anonymous mmaps/mallocs after their callers |
 | `vma-probe.c` | functional CONFIG_ANON_VMA_NAME probe (feeds meta.txt) |
@@ -124,6 +125,19 @@ where `make` drops versioned `libkrunfw.so.5.x.y` files.
 | `parse-smaps.awk` | smaps → per-mapping rows, guest-RAM ID, category rollup |
 
 Build artifacts go to `build/`, results to `results/` (both untracked).
+
+### The Rust port of the driver
+
+`run-audit-rs/` is a standalone-crate Rust duplicate of `run-audit.sh`
+(same CLI, same outputs, same loop semantics). Build it once with
+`cargo build --release` inside the directory and invoke
+`run-audit-rs/target/release/run-audit-rs` exactly like the shell script.
+It still requires `awk` and `python3` on PATH — the smaps parser and the
+annotator run as the same helper subprocesses — and resolves the audit
+home (helpers, `build/`, default `results/`) from `$KRUN_AUDIT_HOME`, the
+binary's location or the cwd. The bash script remains the reference
+implementation; function names mirror it so the two can be compared side
+by side.
 
 ## Metrics
 

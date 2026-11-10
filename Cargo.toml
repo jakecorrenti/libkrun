@@ -22,6 +22,7 @@ exclude = [
     "examples/gtk_display",
     "init/init-binary",
     "init/aws-nitro",
+    "scripts/resource-audit/run-audit-rs",
 ]
 resolver = "2"
 #panic = "abort"

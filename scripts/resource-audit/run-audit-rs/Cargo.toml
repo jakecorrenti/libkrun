@@ -1,0 +1,11 @@
+[package]
+name = "run-audit-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Rust port of the libkrun resource-audit driver (run-audit.sh)"
+license = "Apache-2.0"
+repository = "https://github.com/containers/libkrun"
+publish = false
+
+[dependencies]
+libc = "0.2"
