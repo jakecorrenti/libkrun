@@ -268,6 +268,20 @@ impl<'a> WrapRun<'a> {
                 .and_then(|r| r.strip_suffix(')'))
                 .unwrap_or(result_line.as_str());
             println!("  FAILED: {reason}");
+            // 126/127 mean the launcher could not be executed at all; the
+            // exit code alone says nothing about why, but env's error in
+            // the console log does (most often a relative COMMAND path
+            // that does not resolve from the driver's cwd)
+            let exec_failure = result_line
+                .strip_prefix("FAILED (exit code ")
+                .and_then(|r| r.strip_suffix(')'))
+                .is_some_and(|code| code == "126" || code == "127");
+            if exec_failure {
+                println!(
+                    "  (the launcher itself could not be executed; see {}/guest-console.log)",
+                    self.test_dir.display()
+                );
+            }
             false
         }
     }

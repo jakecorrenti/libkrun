@@ -131,7 +131,11 @@ Build artifacts go to `build/`, results to `results/` (both untracked).
 `run-audit-rs/` is a standalone-crate Rust duplicate of `run-audit.sh`
 (same CLI, same outputs, same loop semantics). Build it once with
 `cargo build --release` inside the directory and invoke
-`run-audit-rs/target/release/run-audit-rs` exactly like the shell script.
+`run-audit-rs/target/release/run-audit-rs` exactly like the shell script
+— including that COMMAND's relative paths resolve from the directory you
+invoke the driver from (the examples above assume the repo root); a
+launcher that cannot be executed at all fails with exit code 127, with
+the reason in `guest-console.log`.
 It still requires `awk` and `python3` on PATH — the smaps parser and the
 annotator run as the same helper subprocesses — and resolves the audit
 home (helpers, `build/`, default `results/`) from `$KRUN_AUDIT_HOME`, the
